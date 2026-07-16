@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Wear Data Layer capability this PHONE app advertises; the watch side looks it up
+         (legacy contract: phone declares "juggluco", watch declares "jugglucowatch"). -->
+    <string-array name="android_wear_capabilities">
+        <item>juggluco</item>
+    </string-array>
+</resources>

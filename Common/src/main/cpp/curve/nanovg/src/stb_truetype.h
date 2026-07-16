@@ -1,3 +1,6 @@
+/*      Modified 2026 by Joshua Meyer as part of Mogluco, a Material 3               */
+/*      redesign fork of Juggluco. See the NOTICE file for details.                  */
+/*                                                                                   */
 // stb_truetype.h - v1.24 - public domain
 // authored from 2009-2020 by Sean Barrett / RAD Game Tools
 //

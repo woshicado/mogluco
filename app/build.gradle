@@ -1,0 +1,115 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+
+
+android {
+    namespace 'de.mogluco'
+    compileSdk 36
+
+    defaultConfig {
+        // Distinct id so the redesigned app installs side-by-side with the legacy
+        // tk.glucodata during migration. Reclaims tk.glucodata at cutover (Phase 8).
+        applicationId 'tk.glucodata.next'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '11.0.0-dev'
+        vectorDrawables { useSupportLibrary true }
+        // :core is flavored by device type (mobile/wear); the phone consumes mobile.
+        missingDimensionStrategy 'device', 'mobile'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        compose true
+    }
+    packagingOptions {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+        jniLibs {
+            // The final APK is assembled by :app, so this module decides how native libs ship.
+            // useLegacyPackaging=true forces extractNativeLibs=true, so the libs are unpacked to
+            // nativeLibraryDir on install. This is REQUIRED, not cosmetic: the closed-source
+            // Libre3 blobs are dlopen'd by absolute filesystem path (Common/.../libre3/loadlibs.cpp
+            // -> "<nativeLibraryDir>/libcrl_dp.so"). With the modern default (extractNativeLibs
+            // =false) those blobs stay inside the APK, the manual dlopen fails, and the very first
+            // sensor-activation scan SIGSEGVs on a null DPGetActivationCommandData pointer. Matches
+            // the :core / :wear / legacy-Common config, all of which set this.
+            useLegacyPackaging = true
+            doNotStrip '**/libcalibrate.so'
+            doNotStrip '**/libcalibrat2.so'
+            doNotStrip '**/libinit.so'
+            doNotStrip '**/liblibre3extension.so'
+            doNotStrip '**/libcrl_dp.so'
+        }
+    }
+
+    def keystoreProperties = new Properties()
+    keystoreProperties.load(new FileInputStream(rootProject.file("keystore.properties")))
+
+    signingConfigs {
+        release {
+            storeFile file(keystoreProperties["storeFile"])
+            storePassword keystoreProperties["storePassword"]
+            keyAlias keystoreProperties["keyAlias"]
+            keyPassword keystoreProperties["keyPassword"]
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+    // Shared data layer + UI primitives (models, repositories, trend arrow, glucose colors).
+    implementation project(':shared')
+
+    def composeBom = platform('androidx.compose:compose-bom:2024.09.00')
+    implementation composeBom
+
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.activity:activity-compose:1.9.2'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.8.6'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6'
+
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.navigation:navigation-compose:2.8.0'
+
+    // Vico — Compose-native charts (replaces the legacy OpenGL/nanovg graph).
+    implementation 'com.patrykandpatrick.vico:compose-m3:2.0.0'
+
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+
+    // Health Connect — optional glucose export to the platform health store (off by default).
+    implementation 'androidx.health.connect:connect-client:1.1.0-rc03'
+
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+}

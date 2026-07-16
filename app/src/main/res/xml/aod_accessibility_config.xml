@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Configuration for AodOverlayService. The service only needs the accessibility context so it
+  can host a TYPE_ACCESSIBILITY_OVERLAY window over the lock screen / AOD; it does not inspect
+  screen content (canRetrieveWindowContent=false). It listens for window-state changes only,
+  to detect when the user leaves the lock screen so the overlay can hide promptly.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/aod_accessibility_description"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault" />

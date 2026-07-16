@@ -1,3 +1,6 @@
+/*      Modified 2026 by Joshua Meyer as part of Mogluco, a Material 3               */
+/*      redesign fork of Juggluco. See the NOTICE file for details.                  */
+/*                                                                                   */
 /*      This file is part of Juggluco, an Android app to receive and display         */
 /*      glucose values from Freestyle Libre 2 and 3 sensors.                         */
 /*                                                                                   */
@@ -813,6 +816,21 @@ extern "C" JNIEXPORT jint  JNICALL   fromjava(directsensorwatch)(JNIEnv *env, jc
         }
     return -1;
        }
+/* Additive (Compose redesign): epoch millis of the last data received from this peer, or 0.
+   Same lookup as directsensorwatch, but exposing the raw freshness stamp so the phone can
+   drive the transfer-ack poll and the (opt-in) auto-reclaim staleness window. */
+extern "C" JNIEXPORT jlong  JNICALL   fromjava(lastwatchdata)(JNIEnv *env, jclass cl,jstring jident) {
+    if(!jident) return 0L;
+    const char *id = env->GetStringUTFChars( jident, NULL);
+    if (id == nullptr) return 0L;
+    destruct   dest([jident,id,env]() {env->ReleaseStringUTFChars(jident, id);});
+    if(passhost_t *host=getwearoshost(false,id,true)) {
+        int index=hostindex(host);
+        long last=lastuptodate[index];
+        return ((jlong)last)*1000LL;
+        }
+    return 0L;
+    }
 extern "C" JNIEXPORT jint  JNICALL   fromjava(hasWatchNums)(JNIEnv *env, jclass cl,jstring jident) {
 
     if(!jident) return -1;

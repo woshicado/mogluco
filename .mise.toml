@@ -1,0 +1,163 @@
+[env]
+JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+_.python.venv = { path = ".venv" }
+
+
+[tasks.devices]
+description = "List connected Android devices"
+run = "adb devices"
+
+[tasks.blobs]
+description = "Fetch the closed-source sensor .so libraries (from an official Juggluco APK)."
+usage = '''
+flag "--force" help="Re-download and re-extract even if the libraries are already present"
+arg "[apk]" help="Path to an already-downloaded Juggluco APK to extract from instead"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+[ "${usage_force:-false}" = "true" ] && args+=(--force)
+[ -n "${usage_apk:-}" ] && args+=("$usage_apk")
+exec scripts/extract-blobs.sh "${args[@]}"
+'''
+
+[tasks.build]
+description = "Assemble the app APK. Flags: --mock (bundle sample data), --release (else debug)."
+# The build links against closed-source sensor libraries that aren't in the repo;
+# fetch them first (no-op once present). See scripts/extract-blobs.sh.
+depends = ["blobs"]
+usage = '''
+flag "--mock" help="Bundle synthetic sample data into the build"
+flag "--release" help="Build the release variant (default: debug)"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+mock="${usage_mock:-false}"
+release="${usage_release:-false}"
+
+app_file="app/src/main/java/nl/juggluco/JugglucoApp.kt"
+# Flip the USE_SAMPLE_DATA source const for this build. In-place edit without `sed -i`
+# (portable across BSD/GNU sed) via a temp file.
+set_flag() { # $1=from $2=to
+  local tmp; tmp="$(mktemp)"
+  sed "s/USE_SAMPLE_DATA = $1/USE_SAMPLE_DATA = $2/" "$app_file" > "$tmp" && mv "$tmp" "$app_file"
+}
+# Always restore the committed default (false) on exit — even if Gradle fails — so the tree
+# is left clean.
+trap 'set_flag true false' EXIT
+if [ "$mock" = "true" ]; then set_flag false true; fi
+
+if [ "$release" = "true" ]; then variant="Release"; else variant="Debug"; fi
+
+echo "Building ${variant} (mock=${mock})…"
+./gradlew ":app:assemble${variant}"
+
+apk="$(ls -t app/build/outputs/apk/*/*.apk 2>/dev/null | head -1)"
+echo "Built: ${apk:-<none>}"
+'''
+
+[tasks.docs]
+description = "Generate docs with mkdocs."
+usage = '''
+flag "--serve" help="Serve the docs locally (default: build)"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${usage_serve:-false}" = "true" ]; then
+  mkdocs serve
+  exit 0
+fi
+
+mkdocs build --clean
+'''
+
+
+[tasks.push]
+description = "Install the latest built APK. Flag: --emulator (use -e) else the USB device (-d)."
+usage = '''
+flag "--emulator" help="Install to the running emulator (adb -e) instead of the USB device (adb -d)"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+emulator="${usage_emulator:-false}"
+if [ "$emulator" = "true" ]; then target="-e"; else target="-d"; fi
+
+apk="$(ls -t app/build/outputs/apk/*/*.apk 2>/dev/null | head -1)"
+if [ -z "${apk:-}" ]; then
+  echo "No APK found under app/build/outputs/apk. Run 'mise run build' first." >&2
+  exit 1
+fi
+
+echo "Installing ${apk} to $([ "$emulator" = "true" ] && echo emulator || echo device)…"
+adb "$target" install -r "$apk"
+'''
+
+[tasks.ship]
+description = "Build both apps in release mode and install to the phone and/or watch."
+depends = ["blobs"]
+usage = '''
+flag "--phone" help="Install the phone app to the connected Pixel phone"
+flag "--watch" help="Install the wear app to the connected Pixel Watch"
+flag "--no-build" help="Skip the Gradle build; install the already-built release APKs"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+phone="${usage_phone:-false}"
+watch="${usage_watch:-false}"
+no_build="${usage_no_build:-false}"
+
+# Default: if neither --phone nor --watch is given, target both.
+if [ "$phone" = "false" ] && [ "$watch" = "false" ]; then
+  phone="true"; watch="true"
+fi
+
+app_apk="app/build/outputs/apk/release/app-release.apk"
+wear_apk="wear/build/outputs/apk/release/wear-release.apk"
+
+if [ "$no_build" != "true" ]; then
+  targets=()
+  [ "$phone" = "true" ] && targets+=(":app:assembleRelease")
+  [ "$watch" = "true" ] && targets+=(":wear:assembleRelease")
+  echo "Building release: ${targets[*]}…"
+  ./gradlew "${targets[@]}"
+fi
+
+# Resolve device serials from `adb devices`. The watch is the device whose model
+# contains "Watch"; the phone is any other (non-watch, non-emulator) device.
+watch_serial="$(adb devices -l | awk '/^emulator/{next} tolower($0) ~ /model:[^ ]*watch/{print $1; exit}')"
+phone_serial="$(adb devices -l | awk 'NR>1 && $2=="device" && $1!~/^emulator/ && tolower($0) !~ /model:[^ ]*watch/{print $1; exit}')"
+
+install() { # $1=label $2=serial $3=apk
+  if [ -z "$2" ]; then
+    echo "No $1 device connected — skipping. Run 'mise run devices' to check." >&2
+    return 1
+  fi
+  if [ ! -f "$3" ]; then
+    echo "APK not found: $3 (build first, or drop --no-build)." >&2
+    return 1
+  fi
+  echo "Installing $1 → $2"
+  adb -s "$2" install -r "$3"
+}
+
+rc=0
+[ "$phone" = "true" ] && { install "phone" "$phone_serial" "$app_apk" || rc=1; }
+[ "$watch" = "true" ] && { install "watch" "$watch_serial" "$wear_apk" || rc=1; }
+exit $rc
+'''
+
+[tools]
+python = "3.13"
+
+[deps]
+[deps.uv]
+auto = true

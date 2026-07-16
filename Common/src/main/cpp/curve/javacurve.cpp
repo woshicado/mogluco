@@ -1,3 +1,6 @@
+/*      Modified 2026 by Joshua Meyer as part of Mogluco, a Material 3               */
+/*      redesign fork of Juggluco. See the NOTICE file for details.                  */
+/*                                                                                   */
 #include <sys/prctl.h>
 #include "curve.hpp"
 #include <jni.h>
@@ -943,6 +946,9 @@ extern bool  exportdata(uint32_t starttime, uint32_t duration,int type,int fd,fl
 extern "C" JNIEXPORT jboolean  JNICALL   fromjava(exportdata)(JNIEnv *env, jclass cl,jint type,jint fd,jfloat days) {
         return  exportdata(appcurve.starttime, appcurve.duration,type,fd,days);
         }
+// exportrange (explicit time window, decoupled from the on-screen graph) reverted:
+// exportnums crashes when iterating the live nums store from a fresh app state. Needs
+// device-side validation; the Compose export UI uses the legacy exportdata for now.
 #endif
 
 extern bool fixatex;

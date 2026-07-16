@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mogluco</string>
+    <!-- Shown in the system Accessibility settings list for the opt-in always-on-display overlay. -->
+    <string name="aod_accessibility_description">Draws your current glucose reading and graph over the lock screen and always-on display. It does not read your screen content.</string>
+</resources>

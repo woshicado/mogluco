@@ -1,0 +1,58 @@
+Mogluco
+=======
+
+Mogluco is a fork of Juggluco, a Material 3 redesign of its Android phone and
+WearOS apps, tested with the Freestyle Libre 3 / 3+.
+
+  Copyright (C) 2026 Joshua Meyer
+  Copyright (C) 2021 Jaap Korthals Altes <jaapkorthalsaltes@gmail.com> (Juggluco)
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE.txt for the full text.
+
+
+Origin
+------
+
+This work is based on Juggluco by Jaap Korthals Altes:
+
+  Website: https://www.juggluco.nl
+  Source:  https://github.com/j-kaltes/Juggluco
+
+Juggluco's sensor-communication core (the native engine and its Libre 2/3 BLE
+and NFC paths) is retained; the phone UI and the WearOS app are rebuilt.
+
+
+Changes from upstream (2026)
+----------------------------
+
+In accordance with section 5 of the GNU General Public License v3, this is a
+modified version of Juggluco. The significant changes made in this fork are:
+
+  * A new Jetpack Compose, Material 3 phone UI replacing the legacy UI
+    (modules: app, shared).
+  * A new WearOS companion app with live value, graph, tile, complications,
+    on-watch alarms, and phone<->watch sensor hand-off (module: wear).
+  * The Juggluco engine glue extracted into a reusable :core module; several
+    engine-facing classes reimplemented against it (module: core).
+  * Reworked background readings and alarm handling.
+
+Files carry per-file notices indicating their origin:
+
+  * Files retaining Juggluco's original code carry Jaap Korthals Altes's
+    copyright notice, plus a "Modified 2026 by Joshua Meyer" banner where this
+    fork changed them.
+  * Files reimplementing a Juggluco class carry Joshua Meyer's copyright with a
+    "Portions derived from Juggluco" acknowledgment.
+  * Wholly new files carry Joshua Meyer's copyright.
+
+
+Trademarks
+----------
+
+"Juggluco" is the name of the upstream project; Mogluco is an independent fork
+and is not affiliated with or endorsed by it. "FreeStyle Libre" is a trademark
+of Abbott; Mogluco is not affiliated with or endorsed by Abbott. These names
+are used only to describe compatibility and origin.

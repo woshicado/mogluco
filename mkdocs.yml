@@ -1,0 +1,57 @@
+site_name: Mogluco
+site_description: A modern Material 3 redesign of Juggluco for the Freestyle Libre 3 / 3+, with a WearOS companion.
+site_url: https://woshicado.github.io/mogluco/
+repo_url: https://github.com/woshicado/mogluco
+repo_name: mogluco
+copyright: >
+  Mogluco is distributed under the GPLv3. Built on Juggluco by J. Kaltes.
+  Not a medical device — not affiliated with Abbott or Juggluco.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Overview: index.md
+  - Installation: installation.md
+  - Onboarding: onboarding.md
+  - Features: features.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - md_in_html
+  - tables
+
+# Keep internal development notes in the repo but out of the published site.
+exclude_docs: |
+  libre3-issue-405-notes.md
+  wear-validation.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/woshicado/mogluco

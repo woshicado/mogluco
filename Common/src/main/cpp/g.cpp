@@ -1,3 +1,6 @@
+/*      Modified 2026 by Joshua Meyer as part of Mogluco, a Material 3               */
+/*      redesign fork of Juggluco. See the NOTICE file for details.                  */
+/*                                                                                   */
 
 #define setthreadname(buf) prctl(PR_SET_NAME, buf, 0, 0, 0)
 /*#ifndef NOLOG
@@ -421,6 +424,33 @@ extern "C" JNIEXPORT jlong JNICALL   fromjava(streamfromSensorptr)(JNIEnv *env, 
         }
     return ((jlong)len)<<48;
     }
+// Companion to streamfromSensorptr but reading the stored HISTORIC (5-minute) array instead of the
+// live poll (1-minute) stream. The redesign's Engine.glucoseHistory() reads both and merges them:
+// the poll stream is dense while connected but empty across a disconnect, whereas the historic array
+// is what the Libre 3's own on-sensor buffer backfills into on reconnect — so this is what fills a
+// gap in the graph after a "Pull history from sensor". Same packing as streamfromSensorptr: time
+// (epoch seconds) in bits[0..31], mg/dL in bits[32..47], next position in bits[48..63].
+extern "C" JNIEXPORT jlong JNICALL   fromjava(historyfromSensorptr)(JNIEnv *env, jclass cl,jlong sensorptr,int pos) {
+    const auto *sens=reinterpret_cast<const SensorGlucoseData*>(sensorptr);
+    int start= sens->getstarthistory();
+    if(start<0) start=0;
+    // Clamp to the mmap'd historydata capacity, exactly as every legacy walk does
+    // (getfirsttime/checkhistory: std::min(getAllendhistory(),maxpos())). getAllendhistory() can
+    // exceed maxpos() for a sensor whose stored end overran the buffer; getglucose() indexes
+    // historydata[pos*getelsize()] with no bounds check, so an unclamped walk reads past the map.
+    const int end= std::min(sens->getAllendhistory(), sens->maxpos());
+    for(int i=(pos<start?start:pos);i<end;i++) {
+        const auto *g=sens->getglucose(i);
+        if(g->valid()) {
+            const long mgdL=g->getmgdL();
+            int next=i+1;
+            for(;next<end&&!sens->getglucose(next)->valid();next++)
+                ;
+            return ((jlong)g->time)|(((jlong)mgdL)<<32)|(((jlong)next)<<48);
+            }
+        }
+    return ((jlong)end)<<48;
+    }
 extern "C" JNIEXPORT void JNICALL   fromjava(setHidefromSensorptr)(JNIEnv *env, jclass cl,jlong sensorptr,jboolean hide) {
     reinterpret_cast<SensorGlucoseData*>(sensorptr)->hide=hide;
      }
@@ -789,7 +819,26 @@ extern "C" JNIEXPORT jint JNICALL   fromjava(getsensorgen)(JNIEnv *envin, jclass
     return usedhist->getsensorgen();
     }
 
-extern "C" JNIEXPORT jbyteArray JNICALL   fromjava(getstreamingAuthenticationData)(JNIEnv *envin, jclass cl,jlong dataptr) { 
+// Current sensor state for the redesign's error banner. Returns:
+//   -1 invalid, 0 ok, 6 sensor error (defective), 7 replace sensor, 8 not ready (warm-up/state),
+//   9 ended. Mirrors the legacy curve status (appcurve.cpp drawsensorstatus): a defective sensor
+//   sets hist->sensorerror right after warm-up when the first reading is out of range.
+extern "C" JNIEXPORT jint JNICALL   fromjava(getSensorState)(JNIEnv *envin, jclass cl,jlong dataptr) {
+    streamdata * const streamptr=reinterpret_cast<streamdata *>(dataptr);
+    if(!dataptr)
+        return -1;
+    const SensorGlucoseData *usedhist=streamptr->hist ;
+    if(!usedhist)
+        return -1;
+    if(usedhist->hasSensorError((uint32_t)time(nullptr)))
+        return usedhist->replacesensor ? 7 : 6;
+    const int state=usedhist->getinfo()->patchState;
+    if(state && state != 4)
+        return state > 4 ? 9 : 8;
+    return 0;
+    }
+
+extern "C" JNIEXPORT jbyteArray JNICALL   fromjava(getstreamingAuthenticationData)(JNIEnv *envin, jclass cl,jlong dataptr) {
     streamdata * const streamptr=reinterpret_cast<streamdata *>(dataptr);
     LOGGER("getstreamingAuthenticationData %p\n",streamptr);
         setthreadname("getstreamingAuthenticationData"  );
@@ -1051,8 +1100,32 @@ extern "C" JNIEXPORT jlongArray JNICALL   fromjava(activeSensorPtrs)(JNIEnv *env
     return ptrAr;
     } 
 
+#endif
+// Every stored sensor (not just those active in the last day, unlike activeSensorPtrs): walks the
+// full on-disk sensor list so the app can show the complete glucose history across past sensors.
+// Used only for history display (not scanning/activation). NOTE: getSensorData() lazily maps a
+// sensor and may grow the hist[] table, so this is NOT side-effect-free and shares activeSensorPtrs'
+// existing assumption that it isn't run concurrently with BLE sensor add/remove on another thread.
+// Compiled for WEAROS too: the redesigned watch app renders the same stored history
+// (mirror-synced or BLE-collected) through Engine.glucoseHistory().
+extern "C" JNIEXPORT jlongArray JNICALL   fromjava(allSensorPtrs)(JNIEnv *env, jclass cl) {
+    std::vector<jlong> ptrs;
+    if(sensors) {
+        const int lastsens = sensors->last();
+        for(int i=0;i<=lastsens;i++) {
+            const SensorGlucoseData *sens=sensors->getSensorData(i);
+            if(sens) ptrs.push_back(reinterpret_cast<jlong>(sens));
+            }
+        }
+    const int len = static_cast<int>(ptrs.size());
+    LOGGER("allSensorPtrs len=%d\n",len);
+    jlongArray ptrAr = env->NewLongArray(len);
+    if(len) env->SetLongArrayRegion(ptrAr, 0, len, ptrs.data());
+    return ptrAr;
+    }
+#ifndef WEAROS
 extern "C" JNIEXPORT jstring JNICALL   fromjava(namefromSensorptr)(JNIEnv *env, jclass cl,jlong sensorptr) {
-    const auto *sens=reinterpret_cast<const SensorGlucoseData*>(sensorptr); 
+    const auto *sens=reinterpret_cast<const SensorGlucoseData*>(sensorptr);
     return env->NewStringUTF(sens->shortsensorname()->data());
     }
 

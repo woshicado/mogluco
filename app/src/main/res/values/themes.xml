@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme used before Compose takes over; Compose drives the real theming. -->
+    <style name="Theme.Mogluco" parent="android:Theme.Material.NoActionBar" />
+</resources>

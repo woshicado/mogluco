@@ -24,6 +24,8 @@ plugins {
 //    id 'org.jetbrains.kotlin.android' version '1.8.0' apply false
 //    id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
     id 'org.jetbrains.kotlin.android' version '2.2.10' apply false
+    // Redesign: Compose compiler plugin (Kotlin 2.x ships the Compose compiler as a Gradle plugin)
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.2.10' apply false
 }
 
 

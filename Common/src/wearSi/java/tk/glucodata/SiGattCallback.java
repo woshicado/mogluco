@@ -1,1 +1,0 @@
-../../../../mobileSi/java/tk/glucodata/SiGattCallback.java

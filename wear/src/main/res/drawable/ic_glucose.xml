@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Droplet glyph used by the complication picker and monochromatic complication images. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,2.5c0,0 -6.5,7.2 -6.5,12A6.5,6.5 0,0 0,12 21a6.5,6.5 0,0 0,6.5 -6.5C18.5,9.7 12,2.5 12,2.5zM12,19a4.5,4.5 0,0 1,-4.5 -4.5c0,-2.9 3.1,-7.2 4.5,-9 1.4,1.8 4.5,6.1 4.5,9A4.5,4.5 0,0 1,12 19z" />
+</vector>

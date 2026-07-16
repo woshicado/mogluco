@@ -1,3 +1,6 @@
+/*      Modified 2026 by Joshua Meyer as part of Mogluco, a Material 3               */
+/*      redesign fork of Juggluco. See the NOTICE file for details.                  */
+/*                                                                                   */
 /*      This file is part of Juggluco, an Android app to receive and display         */
 /*      glucose values from Freestyle Libre 2 and 3 sensors.                         */
 /*                                                                                   */
@@ -411,7 +414,7 @@ extern "C" JNIEXPORT jboolean  JNICALL   fromjava(gethaslibrary)(JNIEnv *env, jc
 
 
 extern "C" JNIEXPORT jint  JNICALL   fromjava(getScreenOrientation)(JNIEnv *env, jclass cl) {
-    return settings->data()->orientation;
+    return -1; // SCREEN_ORIENTATION_UNSPECIFIED
     }
 
 extern "C" JNIEXPORT void  JNICALL   fromjava(setScreenOrientation)(JNIEnv *env, jclass cl,jint val) {

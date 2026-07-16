@@ -1,0 +1,30 @@
+unzipped-apk
+.gradle
+.project
+.settings
+Common/.cxx
+.cxx
+build
+keystore.properties
+release.keystore
+local.properties
+.DS_Store
+**/.classpath
+.kotlin
+*.iml
+.idea
+site
+
+# Closed-source sensor libraries — not redistributable, extracted from an official
+# Juggluco APK at build time. See scripts/extract-blobs.sh / docs/installation.md.
+Common/src/**/jniLibs/**/*.so
+# Downloaded Juggluco APK(s) used to source the blobs.
+Juggluco-*.apk
+
+# Local development changelog — kept out of the published repo.
+CHANGELOG.md
+
+# Local agent/skill config — not for publication.
+.agents/
+.claude
+

@@ -1,0 +1,123 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+
+/**
+ * :wear — the WearOS companion app (Compose for Wear OS, Material 3), consuming the same
+ * :core engine (wear flavor: -DWEAROS native build, isWear=1) and :shared data layer as
+ * the phone.
+ *
+ * The applicationId MUST equal :app's (tk.glucodata.next, .debug suffix in debug): the
+ * Wear Data Layer only delivers messages between apps with the same package name and
+ * signature on phone and watch.
+ */
+android {
+    namespace 'de.mogluco.wear'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'tk.glucodata.next'
+        // Wear OS 4+ (the fleet we target; Pixel Watch 3 is Wear OS 5 / API 34+).
+        minSdk 33
+        targetSdk 35
+        versionCode 1
+        versionName '11.0.0-dev'
+        vectorDrawables { useSupportLibrary true }
+        // Select the wear-flavored :core (isWear=1, -DWEAROS libg.so).
+        missingDimensionStrategy 'device', 'wear'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        compose true
+    }
+    lint {
+        // False positive: our MainActivity is a Compose ComponentActivity (not a
+        // FragmentActivity), so registerForActivityResult needs no Fragment 1.3.0 upgrade.
+        // Without this, lintVitalRelease aborts the release build.
+        disable += 'InvalidFragmentVersionForActivityResult'
+    }
+    packagingOptions {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+        jniLibs {
+            // Same handling as :core/:app — the closed-source Libre3 blobs must arrive
+            // extracted and unstripped (the engine dlopen()s them from nativeLibraryDir).
+            useLegacyPackaging = true
+            doNotStrip '**/libcalibrate.so'
+            doNotStrip '**/libcalibrat2.so'
+            doNotStrip '**/libinit.so'
+            doNotStrip '**/liblibre3extension.so'
+            doNotStrip '**/libcrl_dp.so'
+        }
+    }
+
+    def keystoreProperties = new Properties()
+    keystoreProperties.load(new FileInputStream(rootProject.file("keystore.properties")))
+    signingConfigs {
+        release {
+            storeFile file(keystoreProperties["storeFile"])
+            storePassword keystoreProperties["storePassword"]
+            keyAlias keystoreProperties["keyAlias"]
+            keyPassword keystoreProperties["keyPassword"]
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+    implementation project(':shared')
+
+    // Wear Compose Material 3 (1.6.x) needs Compose 1.9.x — newer BOM than :app's, which is
+    // fine: separate APKs, and :shared's 1.7-compiled composables are forward-compatible.
+    def composeBom = platform('androidx.compose:compose-bom:2026.05.00')
+    implementation composeBom
+
+    implementation 'androidx.wear.compose:compose-material3:1.6.2'
+    implementation 'androidx.wear.compose:compose-foundation:1.6.2'
+    implementation 'androidx.wear.compose:compose-navigation:1.6.2'
+
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.material:material-icons-extended'
+
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.activity:activity-compose:1.9.2'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.8.6'
+    implementation 'androidx.lifecycle:lifecycle-service:2.8.6'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+
+    // Watch surfaces: ongoing chip, watch-face complications, tile.
+    implementation 'androidx.wear:wear-ongoing:1.1.0'
+    implementation 'androidx.wear.watchface:watchface-complications-data-source-ktx:1.3.0'
+    implementation 'androidx.wear.tiles:tiles:1.6.1'
+    implementation 'androidx.wear.protolayout:protolayout:1.4.1'
+    implementation 'androidx.concurrent:concurrent-futures:1.2.0'
+
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    debugImplementation 'androidx.compose.ui:ui-tooling-preview'
+}

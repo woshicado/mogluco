@@ -1,0 +1,166 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+/**
+ * :core wraps the existing native engine (the same CMake build that produces libg.so)
+ * and exposes its JNI surface (tk.glucodata.Natives) to the new Compose app.
+ *
+ * Phase 0 builds libg.so and a minimal Natives probe to prove the new app can link and
+ * call the engine. Phase 1 grows Natives + the engine glue classes into the full surface.
+ *
+ * The CMakeLists is shared with the legacy :Common module (referenced by path, not copied)
+ * so there is one source of truth for the native code during migration.
+ */
+android {
+    namespace 'tk.glucodata'
+    compileSdk 36
+    ndkVersion '29.0.14033849'
+
+    defaultConfig {
+        minSdk 26
+
+        // Build-time constants the ported legacy classes (Log, SensorBluetooth, Libre3, …)
+        // expect on tk.glucodata.BuildConfig. The redesign is Libre 3, phone-only.
+        buildConfigField "int", "libreVersion", "3"
+        buildConfigField "int", "SiBionics", "0"
+        buildConfigField "int", "DexCom", "0"
+        buildConfigField "int", "doLog", "0"
+
+        externalNativeBuild {
+            cmake {
+                // Match the legacy libre3 + app build configuration.
+                arguments '-DJUGGLUCO_APP=TRUE',
+                          '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=TRUE',
+                          '-Dlibre3=TRUE'
+                cppFlags '-std=gnu++26', '-DLIBRE3=1',
+                         '-DAPPID="quotes(tk.glucodata)"', '-DAPPVERSION="quotes(11.0.0)"'
+                cFlags '-DLIBRE3=1',
+                       '-DAPPID="quotes(tk.glucodata)"', '-DAPPVERSION="quotes(11.0.0)"'
+                // Target the user's device arch (and the only ABI with prebuilt Libre3 .so).
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            // Shared with :Common — single source of truth for the C++ engine.
+            path '../Common/src/main/cpp/CMakeLists.txt'
+            // Installed CMake is 3.22.1; the CMakeLists only requires 3.13.
+            version '3.22.1'
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    // The engine serves two device types. The legacy app proved this split as :Common
+    // product flavors (isWear=1 + -DWEAROS); here the same split lives on :core so both
+    // the phone (:app) and watch (:wear) reuse one Java/C++ codebase. The native mirror
+    // code changes roles under -DWEAROS (watch = passive receiver / BLE owner candidate).
+    flavorDimensions = ['device']
+    productFlavors {
+        mobile {
+            dimension 'device'
+            buildConfigField "int", "isWear", "0"
+        }
+        wear {
+            dimension 'device'
+            buildConfigField "int", "isWear", "1"
+            externalNativeBuild {
+                cmake {
+                    // Legacy wear flavor parity (Common/build.gradle wear flavor).
+                    arguments '-DWEAROS=TRUE'
+                    cppFlags '-DWEAROS=1', '-DUSEDIN=1'
+                    cFlags '-DWEAROS=1', '-DUSEDIN=1'
+                    // Wear OS is a 32-bit runtime (Pixel Watch 3 = zygote32,
+                    // armeabi-v7a,armeabi — even on the 64-bit-capable SW5 SoC). The
+                    // arm64-only default would leave the watch with no matching libg.so
+                    // → UnsatisfiedLinkError on the first Natives call. Build 32-bit for
+                    // the real watch AND keep arm64-v8a for the (arm64) Wear emulator.
+                    // NB: the Libre3 decryption blobs are arm64-only, so the watch can
+                    // only run as a MIRROR companion — libg.so dlopen()s those blobs only
+                    // for a direct sensor connection, which never happens on the watch.
+                    abiFilters 'armeabi-v7a', 'arm64-v8a'
+                }
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField "int", "doLog", "1"
+        }
+        release {
+            buildConfigField "int", "doLog", "0"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main {
+            // Prebuilt closed-source Libre3 algorithm/extension libs (arm64-v8a only).
+            // The native engine dlopen()s these from nativeLibraryDir at runtime.
+            jniLibs.srcDirs += ['../Common/src/libre3/jniLibs', '../Common/src/main/jniLibs']
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+            // Don't strip the closed-source Libre3/Libre2 blobs (dlopen'd by name at
+            // runtime; their JNI_OnLoad is called directly). Matches upstream Juggluco.
+            doNotStrip '**/libcalibrate.so'
+            doNotStrip '**/libcalibrat2.so'
+            doNotStrip '**/libinit.so'
+            doNotStrip '**/liblibre3extension.so'
+            doNotStrip '**/libcrl_dp.so'
+        }
+    }
+}
+
+// The engine links against closed-source sensor libraries that are not in the repo
+// (see scripts/extract-blobs.sh). If they are missing, fail early with a clear
+// message instead of a cryptic native link / runtime dlopen error.
+def requiredBlobs = [
+    'Common/src/main/jniLibs/arm64-v8a/libcalibrat2.so',
+    'Common/src/libre3/jniLibs/arm64-v8a/libinit.so',
+    'Common/src/libre3/jniLibs/arm64-v8a/liblibre3extension.so',
+    'Common/src/libre3/jniLibs/arm64-v8a/libcrl_dp.so',
+]
+def checkSensorBlobs = tasks.register('checkSensorBlobs') {
+    doLast {
+        def missing = requiredBlobs.findAll { !rootProject.file(it).exists() }
+        if (!missing.isEmpty()) {
+            throw new GradleException(
+                "Missing closed-source sensor libraries:\n  " + missing.join('\n  ') +
+                "\n\nThese are not redistributable and are not in the repo. Fetch them with:\n" +
+                "  mise run blobs      (or)   scripts/extract-blobs.sh\n" +
+                "See docs/installation.md for details.")
+        }
+    }
+}
+tasks.matching { it.name == 'preBuild' }.configureEach { dependsOn checkSensorBlobs }
+
+dependencies {
+    // @RequiresApi annotations on the ported sensor classes (compile-time only).
+    implementation 'androidx.annotation:annotation:1.9.1'
+
+    // Phone ↔ watch Data Layer (MessageSender/MessageReceiver/WatchLink). api: consumers
+    // see Node types through WatchLink.
+    api 'com.google.android.gms:play-services-wearable:19.0.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    // Tasks.await() bridging for the GMS task API.
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2'
+}

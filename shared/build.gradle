@@ -1,0 +1,49 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+
+/**
+ * :shared — the Kotlin data layer + pure UI primitives used by BOTH the phone (:app) and
+ * the watch (:wear): glucose models/units/state math, the repository interfaces and their
+ * native/mock implementations, the trend arrow, the bitmap sparkline renderer, and the
+ * glucose-semantic color tokens.
+ *
+ * Kotlin packages are unchanged from their original :app locations (de.mogluco.data, …)
+ * so the move is invisible to existing code.
+ */
+android {
+    namespace 'de.mogluco.shared'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 26
+        // :core is flavored by device (mobile/wear); the consuming app's strategy decides
+        // the packaged variant. 'mobile' here only satisfies :shared's standalone compile.
+        missingDimensionStrategy 'device', 'mobile'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        compose true
+    }
+}
+
+dependencies {
+    // Engine/Sensors facades used by NativeGlucoseRepository; api so consumers see tk.glucodata.
+    api project(':core')
+
+    def composeBom = platform('androidx.compose:compose-bom:2024.09.00')
+    implementation composeBom
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.foundation:foundation'
+
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+}

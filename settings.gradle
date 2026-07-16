@@ -15,4 +15,11 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "Glucodata"
-include ':Common'
+
+// The redesign builds only these four modules. :core compiles the native engine and bundles the
+// Libre3 blobs by filesystem path (Common/src/main/cpp + Common/src/*/jniLibs), so the legacy
+// :Common Gradle module is no longer part of the build (its reference-only Java/res are removed).
+include ':core'
+include ':shared'
+include ':app'
+include ':wear'

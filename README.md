@@ -1,41 +1,139 @@
-![value](valuemmolL.png)
-# Juggluco
-Displays Freestyle Libre 2 and 3, Sibionics GS1Sb, AccuChek SmartGuide and Dexcom G7 and ONE+ output
+<h1 align="center">Mogluco</h1>
 
-Juggluco is an app that receives glucose values via Bluetooth from Freestyle Libre 2, 2+, 3 and 3+, Chinese market Sibionics GS1Sb and Dexcom G7 and ONE+ sensors. Juggluco can scan NovoPen® 6 and NovoPen Echo® Plus.
+<p align="center">
+  <em>A modern, Material 3 redesign of <a href="https://www.juggluco.nl">Juggluco</a>'s phone and WearOS watch app; tested with the Freestyle Libre 3 / 3+.</em>
+</p>
 
-Juggluco can send glucose values to all kinds of smartwatches, see left menu→Watch→Help.
+<p align="center">
+  <img src="docs/img/home.png" width="215" alt="Home — current value, trend and graph">
+  &nbsp;
+  <img src="docs/img/averages.png" width="215" alt="Average-day statistics">
+  &nbsp;
+  <img src="docs/img/watch.png" width="215" alt="Pixel Watch companion">
+</p>
 
-The phone version of Juggluco can talk out incoming glucose values, display it in a widget on the home screen and in floating glucose above other apps. Juggluco can display the usual glucose statistics. Other apps can receive data from Juggluco via glucose broadcasts and the web server in Juggluco. Juggluco can send data to Health Connect, Libreview and Nightscout. Data can also be exported to a file or send to another exemplar of Juggluco on another phone, tablet, emulator or watch. It has the option to set low and high glucose alarms and medication reminders.
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#why-this-fork">Why a fork</a> ·
+  <a href="#goals--non-goals">Goals</a> ·
+  <a href="#installation">Install</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="#credits--licence">Credits</a>
+</p>
 
-<h4>Start</h4>To use a Libre 2 sensor, scan it with Juggluco. To take over a Libre 3 sensor, you need to enter in left menu→Settings→Exchange data→Libreview the same account as when activating the sensor and press <i>Get account ID</i>, to receive a number from Libreview. When you now scan the sensor this number will be send to the sensor. A Libreview account is not needed when the Libre 3 sensor is activated with Juggluco: enter an arbitrary number before scanning the sensor. The first time it takes 2 to 10 minutes before Juggluco receives a glucose value via Bluetooth from the sensor. To prevent interference, force stop apps and turn off devices previously used with the sensor. To keep Juggluco running in the background, allow background activity and turn off battery optimizations for Juggluco. Don't hide Juggluco's notification.
+---
 
-After scanning a Libre 2 sensor with Juggluco, Abbott's Libre 2 app can only scan the sensor. When two apps are on the same phone they can both receive glucose values from European Libre 2 sensors, but this can give connection problems. Libre 3 sensors can still be used with Abbott's Libre 3 app after using it with Juggluco: stop Juggluco and scan the sensor with Abbott's Libre 3 app, agreeing that you stop the current sensor and start a new one. When going back to Juggluco you have to scan again. To use a Dexcom G7 or ONE+ sensor, scan the data matrix on the applicator with left menu→<i>Photo</i>. Do the same with the data matrix on the package, to start a Sibionics GS1Sb sensor.
+## What is Mogluco?
 
-WARNING: Glucose sensors are not always accurate. When a glucose reading disagrees with your feelings, use a blood glucose test strip.
+Mogluco reads glucose straight from your Libre 3 / 3+ sensor over Bluetooth and shows it in a clean, modern interface:
 
-<h1>Wear OS</h1>The phone version of Juggluco scans the sensor and sends this data to the WearOS version of Juggluco. Bluetooth on both phone and watch needs to be turn on. For fast transmission, also WIFI. After initialization, you can turn on and off directly connecting the sensor with the watch, with left menu→Watch→Wear OS config→<i>Direct sensor-watch connection</i>. Of the Samsung Galaxy watches, directly connecting to the sensor works very well with Watch4 as long as <b>the watch is on the same arm as the sensor</b>. Watch 5 to 7 only receive a glucose reading every 2 minutes and drain the battery quickly because they disconnect after each reading and are busy reconnecting. With Libre2 (only) TicWatch Pro works as well as Watch4, but Bluetooth is switched off if the watch isn't moved for a long time and not on the charger. Wear OS version contains a watch face and glucose complications.
+- A **home screen** with the current value, trend arrow, an interactive graph, and the reading/event list.
+- A **calendar** to page back through any day, and an **"average day"** view (7d / 30d / 90d / 120d / YTD) with a mean-±SD profile and time-of-day section averages.
+- A **WearOS** companion: live value, trend, a glanceable graph, tile and complications, on-watch alarms, and the ability to hand the sensor connection back and forth with the phone.
+- Reliable **background readings and alarms** (low / high / signal-loss), a persistent notification, and an optional always-on-display graph.
+- Optional, off-by-default export to **Health Connect** and **LibreView**, plus CSV / TSV and full backup.
 
-https://www.juggluco.nl/Jugglucohelp/introhelp.html
+No account is needed, and nothing leaves your phone unless you explicitly request it (e.g., pushing sensor data to LibreView).
 
-## BUILD Juggluco
-The following files need to be added to build Juggluco and can be found by unzipping an Arm/Arm64/x86/x86_64 Juggluco apk from
-https://www.juggluco.nl/Juggluco/download.html
+Mogluco is a [Juggluco](https://www.juggluco.nl) fork and, as such, uses the same sensor communication paths.
+It solely packs all functionality into an entirely new Jetpack Compose UI and WearOS app to not only improve the user interface, but also the user experience by simplifying the scanning flow and settings.
 
-libcalibrat2.so and libcalibrate.so in lib/* of the APK should be put in the corresponding directories (e.g. the libraries from armeabi-v7a of the apk should be put in armeabi-v7) in:    
-./Common/src/main/jniLibs/x86_64/    
-./Common/src/main/jniLibs/armeabi-v7a/   
-./Common/src/main/jniLibs/x86/   
-./Common/src/main/jniLibs/arm64-v8a/   
-   
-libcrl_dp.so  liblibre3extension.so  and libinit.so  in the corresponding directories of:   
-./Common/src/libre3/jniLibs/x86_64/   
-./Common/src/libre3/jniLibs/armeabi-v7a/   
-./Common/src/libre3/jniLibs/x86/   
-./Common/src/libre3/jniLibs/arm64-v8a/   
+## Why this fork?
 
-libnative-algorithm-jni-v113B.so  libnative-encrypy-decrypt-v110.so  libnative-struct2json.so libnative-algorithm-v1_1_3_B.so   libnative-sensitivity-v110.so in   
-./Common/src/mobileSi/jniLibs/armeabi-v7a/   
-./Common/src/mobileSi/jniLibs/arm64-v8a/
+[Juggluco](https://www.juggluco.nl) is a great help for monitoring blood sugar levels in a privacy-preserving manner on your smartphone and smartwatch.
 
+However, in my opinion in came short in both user interface as well as user experience (requiring complicated setups, with intransparent menus to scan sensors or change settings).
+I wanted to build on this and keep the general monitoring capabilities while improving the UI and UX:
 
+1. **A modern look and feel**: a Material 3 interface, a cleaner information hierarchy, and interactions that feel native to a current Android phone.
+2. **A proper WearOS experience** on my Pixel Watch 3: live glucose, a readable graph, complications, and on-watch alarms, with the sensor connection able to move between phone and watch.
+
+Rather than rewrite the sensor stack, Mogluco keeps Juggluco's core and rebuilds only the surface: the phone UI and the watch app. That keeps the thing that matters — the sensor data and communication flow — stable, while providing a better user experience.
+
+## Goals & non-goals
+
+**Goals**
+
+- A focused, opinionated, modern **Material 3** UI for viewing Libre 3 / 3+ data.
+- A useful WearOS companion.
+- **Reliability** of background readings and alarms.
+- **Local-first & private**: your data stays on-device unless you explicitly enable an export.
+
+**Non-goals**
+
+- **Not** trying to match every sensor that Juggluco supports. Mogluco is built and tested around **Libre 3 / 3+** as this is what I can test and verify. Other sensor paths inherited from the engine are neither the focus nor verified here.
+- **Not** aiming for feature-parity with Juggluco's full menu. It is a deliberately smaller, redesigned subset that I cared about.
+- **Not** a cloud service. There is no Mogluco account, server, or telemetry.
+
+## Features
+
+| | |
+|---|---|
+| **Home** | Current value + rate-arrow, interactive graph (tap-to-inspect, adjustable time windows, configurable no-data gap breaks), reading & event lists |
+| **Events** | Log carbs, insulin (fast/slow), dextrose, activity, blood-glucose checks; shown on the graph and in the list |
+| **Calendar** | Page any past day; per-day graph, readings and events; sensor timeline |
+| **Averages** | "Average day" profile with a ±1 SD band and 6-hour section means over 7 / 30 / 90 / 120 days or year-to-date |
+| **Alarms** | Low / high / signal-loss, with snooze, repeat, and an optional Do-Not-Disturb override |
+| **Notification & AOD** | Persistent lock-screen reading + mini graph; opt-in always-on-display graph |
+| **WearOS** | Live value, trend, glanceable graph, tile & complications, on-watch alarms, phone↔watch sensor hand-off |
+| **Export** | Health Connect (opt-in), LibreView, CSV / TSV, and a full backup / restore |
+| **Smoothing** | Optional EMA smoothing of the trace, with adjustable strength |
+
+See the [documentation](#documentation) for a guided tour with screenshots.
+
+## Installation
+
+Mogluco is an Android app for a phone running **Android 8.0 (API 26)+**, with an optional **WearOS 3+** companion. It can be installed alongside the original Juggluco.
+
+**Build it from source.** Mogluco reuses Juggluco's sensor engine, which depends on a few closed-source native libraries that belong to Abbott / Juggluco and **cannot be redistributed** — so, like upstream Juggluco, they are not included here and no prebuilt APK is distributed. A helper fetches them from an official Juggluco APK on first build, so the whole flow is:
+
+```bash
+git clone https://github.com/woshicado/mogluco.git && cd mogluco
+mise run blobs      # one-time: fetch the closed-source sensor libraries
+mise run build      # build the phone APK  (also runs `blobs` automatically)
+mise run ship       # release-build and install to a connected phone (+ watch)
+```
+
+`mise run build` and `mise run ship` invoke the library fetch themselves, so `mise run blobs` is only needed if you want to run it up front. See [`scripts/extract-blobs.sh`](scripts/extract-blobs.sh) for exactly what it downloads.
+
+Full step-by-step install, the library-fetch details, and first-sensor onboarding are in **[the documentation](#documentation)**.
+
+> [!NOTE]
+> **"Restricted setting" blocking the accessibility toggle?**
+>
+> The optional [always-on-display / lock-screen graph](#features) runs as an accessibility service. Because Mogluco is sideloaded (installed outside an app store), Android blocks it from enabling accessibility until you explicitly allow it.
+> If the toggle is greyed out or you see *"Restricted setting"*, go to **Settings → Apps → Mogluco → ⋮ (top-right menu) → Allow restricted settings**, then return to Accessibility and enable Mogluco's **Use** toggle.
+>
+> Official instructions: <https://support.google.com/android/answer/12623953#allowrestrictedsettings>.
+
+## Documentation
+
+A small docs site (installation, onboarding, and a feature tour with screenshots) lives in [`docs/`](docs/) and is published with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/)  at <https://woshicado.github.io/mogluco/>
+
+```bash
+pip install -r docs/requirements.txt
+mkdocs serve      # preview at http://127.0.0.1:8000
+```
+
+## Built with generative AI
+
+Much of Mogluco's redesign were written with the help of **generative AI (specifically Anthropic's Claude Opus 4.8/Fable 5)**, under human direction and review.
+Therefore, this fork may contain bugs, and in particular those often encountered when using such models for programming.
+While I tried my best to test the app's functionality and work out any bugs, be aware that typical errors may be encountered.
+
+If you encounter any bugs, please reach out so I can look at them and fix them.
+
+## Credits & licence
+
+Thanks to **J. Kaltes** for providing [Juggluco](https://www.juggluco.nl), which has been used as a base for this project, and simplified the development of this project:
+
+- Juggluco website: **https://www.juggluco.nl**
+- Juggluco source: **https://github.com/j-kaltes/Juggluco**
+
+Mogluco is a fork and is distributed under the **GNU General Public License v3.0**, the same licence as Juggluco — see [`LICENSE.txt`](LICENSE.txt). It is an independent, non-commercial project and is **not affiliated with or endorsed by Abbott or Juggluco**.
+
+## ⚠️ Safety
+
+Glucose sensors are not always accurate. **When a reading disagrees with how you feel, use a blood-glucose fingerstick.**
+Mogluco is a data viewer, not a medical device.
+Do not use it to make treatment decisions on its own.
