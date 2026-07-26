@@ -1,5 +1,11 @@
 [env]
 JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+# Pins the adb used by the tasks below to the SDK's own copy, so it matches the one Gradle and
+# Studio use (they resolve it from sdk.dir and ignore PATH) regardless of the calling shell —
+# .zshrc-set PATH doesn't reach non-interactive shells like CI.
+# macOS SDK location; on Linux change both to ~/Android/Sdk (as with JAVA_HOME above).
+ANDROID_HOME = "{{env.HOME}}/Library/Android/sdk"
+_.path = ["{{env.HOME}}/Library/Android/sdk/platform-tools"]
 _.python.venv = { path = ".venv" }
 
 
@@ -38,7 +44,7 @@ set -euo pipefail
 mock="${usage_mock:-false}"
 release="${usage_release:-false}"
 
-app_file="app/src/main/java/nl/juggluco/JugglucoApp.kt"
+app_file="app/src/main/java/de/mogluco/MoglucoApp.kt"
 # Flip the USE_SAMPLE_DATA source const for this build. In-place edit without `sed -i`
 # (portable across BSD/GNU sed) via a temp file.
 set_flag() { # $1=from $2=to

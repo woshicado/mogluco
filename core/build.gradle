@@ -139,9 +139,12 @@ def requiredBlobs = [
     'Common/src/libre3/jniLibs/arm64-v8a/liblibre3extension.so',
     'Common/src/libre3/jniLibs/arm64-v8a/libcrl_dp.so',
 ]
+// Resolve against the root dir captured at configuration time: task actions must not
+// touch `rootProject` (a Gradle script object) or the configuration cache rejects them.
+def rootDirPath = rootProject.projectDir
 def checkSensorBlobs = tasks.register('checkSensorBlobs') {
     doLast {
-        def missing = requiredBlobs.findAll { !rootProject.file(it).exists() }
+        def missing = requiredBlobs.findAll { !new File(rootDirPath, it).exists() }
         if (!missing.isEmpty()) {
             throw new GradleException(
                 "Missing closed-source sensor libraries:\n  " + missing.join('\n  ') +
