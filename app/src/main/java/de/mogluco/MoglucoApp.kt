@@ -13,6 +13,7 @@ import de.mogluco.data.GlucoseRepository
 import de.mogluco.data.GlucoseUnit
 import de.mogluco.data.MockEventRepository
 import de.mogluco.data.MockGlucoseRepository
+import de.mogluco.data.EventNoteStore
 import de.mogluco.data.NativeEventRepository
 import de.mogluco.data.NativeGlucoseRepository
 import de.mogluco.data.NativeSettingsRepository
@@ -76,7 +77,7 @@ class MoglucoApp : Application() {
             // doesn't sit on the mg/dL 70–180 defaults until they reconfigure by hand (the engine
             // was started by the repository construction above).
             preferences.seedDisplayFromEngineOnce()
-            eventRepository = NativeEventRepository()
+            eventRepository = NativeEventRepository(EventNoteStore(this))
             // Phone↔watch link: discovery, mirror handshakes, transfer state. Needs the
             // booted engine (the repository construction above started it).
             tk.glucodata.WatchLink.init(this)

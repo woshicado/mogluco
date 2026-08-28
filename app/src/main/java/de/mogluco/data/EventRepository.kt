@@ -60,7 +60,12 @@ interface EventRepository {
     fun deleteBefore(millis: Long)
 }
 
-class NativeEventRepository : EventRepository {
+/**
+ * @param notes side-store for event text. The engine has no note channel (see [EventNoteStore]),
+ *   so notes are written next to it under the same (time, type, value) key the engine uses to
+ *   identify a row — which is why every mutation below keeps the two in step.
+ */
+class NativeEventRepository(private val notes: EventNoteStore) : EventRepository {
 
     private val _recent = MutableStateFlow<List<LoggedEvent>>(emptyList())
     override val recent: Flow<List<LoggedEvent>> = _recent.asStateFlow()
@@ -81,23 +86,30 @@ class NativeEventRepository : EventRepository {
     }
 
     override fun log(type: EventType, value: Float, atMillis: Long, note: String) {
-        // TODO(real-engine): the native saveNum path has no note channel yet, so [note] is
-        // dropped here. Wire it through once Engine.logEvent accepts note text.
         Engine.logEvent(type.index, value, atMillis)
+        // Same second-resolution truncation the engine applies (saveNum takes timeMillis / 1000),
+        // so the key written here is the one refresh() reads back.
+        notes.put(atMillis / 1000L, type.index, value, note)
         refresh()
     }
 
     // Events carry no stable id natively, so update = delete-the-old + log-the-new. The OLD tuple
     // (original) is the delete key — using the edited tuple would never match the stored row and
-    // would just append a duplicate. The note is dropped (no native note channel — see log()).
+    // would just append a duplicate.
     override fun update(original: LoggedEvent, edited: LoggedEvent) {
         Engine.deleteEvent(original.epochMillis, original.type, original.value)
         Engine.logEvent(edited.type, edited.value, edited.epochMillis)
+        // The note is keyed by that same tuple, so editing the time, type or value moves it:
+        // retire the old key first, then write the new one. When the tuple is unchanged the two
+        // keys are equal and this collapses to a plain rewrite of the text.
+        notes.remove(original.epochMillis / 1000L, original.type, original.value)
+        notes.put(edited.epochMillis / 1000L, edited.type, edited.value, edited.note)
         refresh()
     }
 
     override fun delete(event: LoggedEvent) {
         Engine.deleteEvent(event.epochMillis, event.type, event.value)
+        notes.remove(event.epochMillis / 1000L, event.type, event.value)
         refresh()
     }
 
@@ -120,11 +132,15 @@ class NativeEventRepository : EventRepository {
                 Engine.logEvent(e.type, e.value, e.epochMillis)
             }
         }
+        // Notes for the whole batch, not just the newly inserted rows: an event that already
+        // existed here without a note should still get the one the backup carries.
+        notes.merge(events)
         refresh()
     }
 
     override fun deleteBefore(millis: Long) {
         Engine.deleteEventsBefore(millis)
+        notes.removeBefore(millis / 1000L)
         refresh()
     }
 
@@ -141,6 +157,7 @@ class NativeEventRepository : EventRepository {
                 epochMillis = it.time * 1000L,
                 type = it.type,
                 value = it.value,
+                note = notes.note(it.time, it.type, it.value),
                 category = category,
                 label = eventDisplayName(raw?.name.orEmpty(), category),
             )
