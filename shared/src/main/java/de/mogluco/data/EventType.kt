@@ -42,6 +42,136 @@ val EventCategory.unit: String
         else -> ""
     }
 
+// ---------------- Stock label taxonomy ----------------
+
+// Slots in the engine's stock label vocabulary. Settings::mklabels seeds the settings store with
+// these seven labels in this fixed order on first run, taking the wording from the device
+// language — the order is the same in every language, only the words differ.
+private const val SLOT_DEXTROSE = 2
+private const val SLOT_SLOW_INSULIN = 3
+
+/** Category of each stock slot, indexed by slot number. */
+private val SLOT_CATEGORY = listOf(
+    EventCategory.INSULIN,  // 0 fast insulin
+    EventCategory.CARBS,    // 1 carbohydrates
+    EventCategory.CARBS,    // 2 dextrose
+    EventCategory.INSULIN,  // 3 slow insulin
+    EventCategory.ACTIVITY, // 4 bike
+    EventCategory.ACTIVITY, // 5 walk
+    EventCategory.BLOOD,    // 6 blood
+)
+
+/**
+ * Every shipped language's stock labels, in slot order, copied verbatim from the engine's language
+ * tables (Common/src/main/cpp/curve/<lang>jugglucotext.cpp).
+ *
+ * This table is what makes classification locale-proof, and it is not optional: a German install
+ * stores "Ins schnell" / "Langes Insu" / "radeln" / "Blut", none of which contain an English
+ * keyword, so recognising labels by English substring alone left insulin, cycling and blood
+ * unclassified — which dropped them from the add-event menu entirely and made already-logged
+ * entries of those kinds invisible on the graph. Keep the rows in sync when upstream adds or
+ * retitles a language.
+ */
+private val STOCK_LABEL_ROWS = listOf(
+    listOf("Fast Insuli", "Carbohydra", "Dextro", "Long Insuli", "Bike", "Walk", "Blood"),              // en
+    listOf("Ins schnell", "Kohlenhydra", "Dextrose", "Langes Insu", "radeln", "Walk", "Blut"),          // de
+    listOf("Insuli snel", "Koolhydraat", "Dextro", "Insuli lang", "Fietsen", "Wandelen", "Bloed"),      // nl
+    listOf("Ins. rapide", "Glucides", "Dextro", "Ins. basale", "Vélo", "Marche", "Sang"),               // fr
+    listOf("Fast Insuli", "Carbohidra", "Dextro", "Insu largos", "Bicicleta", "Caminar", "Sangre"),     // es
+    listOf("Insu Rápida", "Carbohidra", "Glicemia", "Insul Lenta", "Bicicleta", "Caminhada", "Sangue"), // pt
+    listOf("Rapida", "Carboidrati", "Glucosio", "Lenta", "Bike", "Walk", "Capillare"),                  // it
+    listOf("Insul szybk", "Węglowodan", "Dextro", "Insul dług", "Rower", "Spacer", "Krew"),             // pl
+    listOf("Insulin", "Kolhydrater", "Dextro", "Basinsulin", "Cykling", "Promenad", "Blod"),            // sv
+    listOf("HizliEtkili", "Karbonhidrt", "Dextro", "Uzun Etkili", "Bisiklet", "Yürüyüş", "Kan Degeri"), // tr
+    listOf("Kopoтkuй", "Yглeвoд", "Сахар", "Дoлгuй", "Велик", "Хoдьбa", "Кровь"),                       // ru
+    listOf("Хуткі", "Вугляв", "Дэкстр", "Доўгі", "Ровар", "Прагул", "Кроў"),                            // be
+    listOf("Швидкий", "Вуглев", "Дэкстр", "Довгий", "Велос", "Прагул", "Кров"),                         // uk
+    listOf("מהיר Insuli", "קרבוהידרה", "דקסטרו", "לונג אינסולי", "אופניים", "ללכת", "דם"),              // iw
+    listOf("快速胰岛素", "碳水化合物", "右旋糖酐", "长效胰岛素", "骑自行车", "步行", "血液"),                  // zh
+)
+
+/**
+ * Lowercased stock label → slot. A word that lands in different slots in different languages is
+ * dropped rather than guessed at, so an ambiguous match falls through to the keyword hints.
+ */
+private val STOCK_SLOTS: Map<String, Int> = buildMap {
+    val ambiguous = mutableSetOf<String>()
+    STOCK_LABEL_ROWS.forEach { row ->
+        row.forEachIndexed { slot, label ->
+            val key = label.lowercase()
+            val previous = put(key, slot)
+            if (previous != null && previous != slot) ambiguous += key
+        }
+    }
+    ambiguous.forEach { remove(it) }
+}
+
+/**
+ * The stock slot a stored label came from, or null when it isn't one of the shipped defaults —
+ * i.e. the user renamed it, and the keyword hints below have to decide.
+ */
+private fun stockSlot(rawName: String): Int? {
+    val n = rawName.trim().lowercase()
+    if (n.isEmpty()) return null
+    STOCK_SLOTS[n]?.let { return it }
+    // Labels live in a 12-byte field natively, so a longer stock name (notably the multi-byte
+    // Chinese and Hebrew ones) can read back truncated. Accept a prefix, but only an unambiguous
+    // one — "insul" alone is the head of both the Polish fast and slow labels.
+    if (n.length < 4) return null
+    return STOCK_SLOTS.entries.filter { it.key.startsWith(n) }.map { it.value }.distinct().singleOrNull()
+}
+
+// Fallbacks for labels the user renamed by hand, matched as substrings of the lowercased label.
+// The stock table above already covers untouched installs, so these only need to catch the common
+// ways people retitle a slot — usually the actual insulin brand.
+private val INSULIN_HINTS = listOf(
+    "insul", "insu", "ins.", "rapid", "bolus", "basal", "hizli", "szybk", "schnell",
+    "aspart", "lispro", "glulis", "fiasp", "humalog", "novorapid", "novolog", "apidra",
+    "levemir", "tresiba", "lantus", "toujeo", "abasaglar", "degludec", "glargin", "detemir",
+    "actrapid", "humulin", "胰岛素", "אינסולי",
+)
+private val CARBS_HINTS = listOf(
+    "carb", "kohlenhydr", "koolhydr", "kolhydr", "karbonhid", "carboidr", "carbohidr",
+    "glucid", "węglowodan", "weglowodan", "углевод", "вуглев", "вугляв", "碳水",
+    "dextro", "glucos", "glicem", "右旋糖",
+)
+private val ACTIVITY_HINTS = listOf(
+    "bike", "walk", "run", "exerc", "radel", "fiets", "wandel", "vélo", "velo", "marche",
+    "bicicl", "camin", "rower", "spacer", "cykl", "promenad", "bisiklet", "yürüy", "yuruy",
+    "велик", "ровар", "велос", "прагул", "ходьб", "骑", "步行",
+)
+private val BLOOD_HINTS = listOf(
+    "blood", "blut", "bloed", "blod", "sangre", "sangue", "sang", "krew", "kan ", "capillare",
+    "кров", "кроў", "血",
+)
+private val SLOW_INSULIN_HINTS = listOf(
+    "long", "slow", "basal", "basin", "depot", "lang", "lent", "larg", "dług", "dlug",
+    "uzun", "довг", "доўг", "长效", "לונג",
+    "levemir", "tresiba", "lantus", "toujeo", "abasaglar", "degludec", "glargin", "detemir",
+    "insulatard", "protaphan",
+)
+private val DEXTROSE_HINTS = listOf(
+    "dextro", "glucos", "glicem", "дэкстр", "декстр", "сахар", "右旋糖",
+)
+
+/**
+ * Whether an insulin label means the long-acting/basal insulin rather than the rapid bolus. Stock
+ * labels resolve by slot, so this is language-independent. Shared by the display name and the
+ * curated menu so the two can never disagree about which label is which.
+ */
+fun isSlowInsulinLabel(rawName: String): Boolean {
+    stockSlot(rawName)?.let { return it == SLOT_SLOW_INSULIN }
+    val n = rawName.lowercase()
+    return SLOW_INSULIN_HINTS.any { it in n }
+}
+
+/** Whether a carbohydrate label means fast sugar (dextrose) rather than a regular meal. */
+fun isDextroseLabel(rawName: String): Boolean {
+    stockSlot(rawName)?.let { return it == SLOT_DEXTROSE }
+    val n = rawName.lowercase()
+    return DEXTROSE_HINTS.any { it in n }
+}
+
 /** An engine event type, derived from the native `getLabels()` taxonomy. */
 data class EventType(
     val index: Int,
@@ -53,15 +183,18 @@ data class EventType(
 
     companion object {
         fun classify(index: Int, name: String, carbsIndex: Int): EventCategory {
+            // An untouched stock label is decided by its slot, in any language; only renamed
+            // labels fall through to the keyword hints.
+            stockSlot(name)?.let { return SLOT_CATEGORY[it] }
             val n = name.lowercase().trim()
             return when {
-                "insul" in n -> EventCategory.INSULIN
-                index == carbsIndex || "carb" in n || "dextro" in n -> EventCategory.CARBS
-                "bike" in n || "walk" in n || "run" in n || "exerc" in n -> EventCategory.ACTIVITY
+                INSULIN_HINTS.any { it in n } -> EventCategory.INSULIN
+                index == carbsIndex || CARBS_HINTS.any { it in n } -> EventCategory.CARBS
+                ACTIVITY_HINTS.any { it in n } -> EventCategory.ACTIVITY
                 // The stock "Blood" label is a blood-glucose reference. Without this, a blood event
                 // logged at the label index (vs. the getbloodvar() calibration sentinel) read back
                 // as OTHER → violet marker + wrong icon. Classify it so it's red everywhere.
-                "blood" in n -> EventCategory.BLOOD
+                BLOOD_HINTS.any { it in n } -> EventCategory.BLOOD
                 else -> EventCategory.OTHER
             }
         }
@@ -70,23 +203,21 @@ data class EventType(
 
 /**
  * Canonical display name for an event, independent of the engine's stock label text. The native
- * labels are terse/inconsistent ("Long Insuli", "Dextro", separate "Bike"/"Walk"); we present a
- * curated, fixed vocabulary instead. Used by both the curated FAB list and the read-back mapping
- * so a logged event reads the same name everywhere. The underlying native index is never changed.
+ * labels are terse/inconsistent ("Long Insuli", "Dextro", separate "Bike"/"Walk") and localised to
+ * whatever language the install was created in; we present a curated, fixed vocabulary instead.
+ * Used by both the curated FAB list and the read-back mapping so a logged event reads the same name
+ * everywhere. The underlying native index is never changed.
  */
-fun eventDisplayName(rawName: String, category: EventCategory): String {
-    val n = rawName.lowercase()
-    return when {
+fun eventDisplayName(rawName: String, category: EventCategory): String =
+    when {
         category == EventCategory.BLOOD -> "Blood glucose"
         category == EventCategory.ACTIVITY -> "Activity"
-        category == EventCategory.INSULIN &&
-            ("long" in n || "slow" in n || "basal" in n || "depot" in n) -> "Slow insulin"
+        category == EventCategory.INSULIN && isSlowInsulinLabel(rawName) -> "Slow insulin"
         category == EventCategory.INSULIN -> "Fast insulin"
-        category == EventCategory.CARBS && "dextro" in n -> "Dextrose"
+        category == EventCategory.CARBS && isDextroseLabel(rawName) -> "Dextrose"
         category == EventCategory.CARBS -> "Carbohydrates"
         else -> rawName
     }
-}
 
 /**
  * The curated, ordered event vocabulary shown in the add/edit UI, mapped onto the engine's stock
@@ -101,27 +232,18 @@ fun curatedDisplayTypes(raw: List<EventType>, bloodIndex: Int, enabled: Set<LogK
         if (t != null && kind in enabled) out += t.copy(name = eventDisplayName(t.name, kind.category), category = kind.category)
     }
 
-    val blood = raw.firstOrNull { it.index == bloodIndex } ?: raw.firstOrNull { "blood" in it.name.lowercase() }
+    // getbloodvar() reports the label count when no calibration label is configured, so bloodIndex
+    // can point one past the taxonomy; fall back to whichever label classified as blood.
+    val blood = raw.firstOrNull { it.index == bloodIndex }
+        ?: raw.firstOrNull { it.category == EventCategory.BLOOD }
     add(blood, LogKind.BLOOD)
 
     add(raw.firstOrNull { it.category == EventCategory.ACTIVITY }, LogKind.ACTIVITY)
 
-    add(
-        raw.firstOrNull {
-            it.category == EventCategory.INSULIN &&
-                it.name.lowercase().let { n -> "long" in n || "slow" in n || "basal" in n || "depot" in n }
-        },
-        LogKind.SLOW_INSULIN,
-    )
-    add(
-        raw.firstOrNull {
-            it.category == EventCategory.INSULIN &&
-                it.name.lowercase().let { n -> !("long" in n || "slow" in n || "basal" in n || "depot" in n) }
-        },
-        LogKind.FAST_INSULIN,
-    )
-    add(raw.firstOrNull { it.category == EventCategory.CARBS && "dextro" !in it.name.lowercase() }, LogKind.CARBS)
-    add(raw.firstOrNull { "dextro" in it.name.lowercase() }, LogKind.DEXTROSE)
+    add(raw.firstOrNull { it.category == EventCategory.INSULIN && isSlowInsulinLabel(it.name) }, LogKind.SLOW_INSULIN)
+    add(raw.firstOrNull { it.category == EventCategory.INSULIN && !isSlowInsulinLabel(it.name) }, LogKind.FAST_INSULIN)
+    add(raw.firstOrNull { it.category == EventCategory.CARBS && !isDextroseLabel(it.name) }, LogKind.CARBS)
+    add(raw.firstOrNull { it.category == EventCategory.CARBS && isDextroseLabel(it.name) }, LogKind.DEXTROSE)
 
     return out.distinctBy { it.index }
 }
