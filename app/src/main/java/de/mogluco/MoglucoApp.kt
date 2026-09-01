@@ -78,6 +78,9 @@ class MoglucoApp : Application() {
             // was started by the repository construction above).
             preferences.seedDisplayFromEngineOnce()
             eventRepository = NativeEventRepository(EventNoteStore(this))
+            // Classify the event labels for LibreView and include logged insulin/carbs in the
+            // uploads (they only leave the device while the LibreView upload toggle is on).
+            de.mogluco.data.LibreEventSync.sync()
             // Phone↔watch link: discovery, mirror handshakes, transfer state. Needs the
             // booted engine (the repository construction above started it).
             tk.glucodata.WatchLink.init(this)

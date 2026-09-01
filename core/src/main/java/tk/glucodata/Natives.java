@@ -337,6 +337,9 @@ public class Natives {
   public static native void savelibrerubbish(
       String FirstName, String LastName, int dat, String GardianFirstName, String GuardianLastName);
 
+  /** "First Last" as stored from the LibreView account fetch, or "" when never fetched. */
+  public static native String getPatientName();
+
   /** Triggers the native thread to fetch the account ID from LibreView (uses stored email/pass). */
   public static native void askServerforAccountID();
 
@@ -347,6 +350,20 @@ public class Natives {
 
   /** Wake the upload thread to send now ({@code min}=0 = immediately). */
   public static native void wakelibreview(int min);
+
+  /** Include logged amounts (insulin/carbs/notes) in LibreView uploads. */
+  public static native void setSendNumbers(boolean val);
+
+  public static native boolean getSendNumbers();
+
+  /**
+   * Classify event label {@code index} for LibreView upload: kind 0=off, 1=rapid insulin, 2=long
+   * insulin, 3=carbs ({@code weight} = grams per logged unit), 4=custom note. {@code night}=0 is
+   * the LibreView table ({@code night}=1 is Nightscout's).
+   */
+  public static native void setlibrenum(int night, int index, int kind, float weight);
+
+  public static native int getlibrenumkind(int night, int index);
 
   // --- Calibration ---
 

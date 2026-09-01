@@ -288,6 +288,19 @@ public final class Engine {
         return Libreview.librestatus;
     }
 
+    /**
+     * This install's LibreView device identifier (the "uniqueIdentifier" sent with uploads).
+     * LibreView's own CSV export lists it in the Serial Number column for phone-app uploads.
+     */
+    public static String libreviewDeviceId() {
+        return started ? safe(Natives.getlibreDeviceID(true)) : "";
+    }
+
+    /** Patient name ("First Last") stored from the LibreView account fetch, or "". */
+    public static String libreviewPatientName() {
+        return started ? safe(Natives.getPatientName()) : "";
+    }
+
     /** Timestamp string of the last successful upload, or null. */
     public static String libreviewLastUpload() {
         return Libreview.posttime;
@@ -357,6 +370,41 @@ public final class Engine {
             }, 30_000L);
         }
         Log.i(LOG_ID, "pushOnce (wasOn=" + wasOn + ")");
+    }
+
+    // --- Logged-event (insulin/carb) upload ---
+    //
+    // The native upload thread can embed logged amounts in the same LibreView POST as the glucose
+    // readings, but only for labels classified in its librenums table and only while its global
+    // sendnumbers switch is on. Neither has any other setter in this app, so both are driven from
+    // here (see de.mogluco.data.LibreEventSync).
+
+    /** Include logged events (insulin/carbs) in LibreView uploads. No-op until classified via
+     *  {@link #classifyEventLabel}; data still only leaves while uploading is enabled. */
+    public static void setEventUpload(boolean on) {
+        if (started) {
+            Natives.setSendNumbers(on);
+            Log.i(LOG_ID, "setEventUpload " + on);
+        }
+    }
+
+    /** Whether logged events are included in LibreView uploads. */
+    public static boolean isEventUpload() {
+        return started && Natives.getSendNumbers();
+    }
+
+    /**
+     * Classify an event label for LibreView upload.
+     *
+     * @param index a label index from {@link #getLabels()}
+     * @param kind 0=don't upload, 1=rapid insulin, 2=long insulin, 3=carbs, 4=custom note
+     * @param gramsPerUnit for kind 3, grams per logged unit (1.0 when values are already grams);
+     *   ignored for the other kinds
+     */
+    public static void classifyEventLabel(int index, int kind, float gramsPerUnit) {
+        if (started) {
+            Natives.setlibrenum(0, index, kind, gramsPerUnit);
+        }
     }
 
     private static String safe(String s) {

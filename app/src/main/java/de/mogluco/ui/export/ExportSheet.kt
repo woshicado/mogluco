@@ -109,6 +109,12 @@ fun ExportSheet(
             return@rememberLauncherForActivityResult
         }
         exporting = true
+        // The LibreView format mirrors what the LibreView site itself would export for this
+        // account: rows carry this install's LibreView device id (what its Seriennummer column
+        // shows for phone uploads — not the sensor serial) and the preamble names the account
+        // holder. Resolved here, once, where the engine is reachable (blank in sample mode).
+        val libreSerial = runCatching { tk.glucodata.Engine.libreviewDeviceId() }.getOrDefault("")
+        val createdBy = runCatching { tk.glucodata.Engine.libreviewPatientName() }.getOrDefault("")
         scope.launch {
             // Writing up to ~300k points (gzipped for backups) is multi-second work; running it
             // right here in the ActivityResult callback blocked Main and could ANR.
@@ -117,7 +123,10 @@ fun ExportSheet(
             val ok = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
                 runCatching {
                     context.contentResolver.openOutputStream(uri)?.use { os ->
-                        DataExporter.export(os, fmt, points, events, unit, window.first, window.last, serial, settings)
+                        DataExporter.export(
+                            os, fmt, points, events, unit, window.first, window.last,
+                            serial, settings, libreSerial, createdBy,
+                        )
                     } != null
                 }.getOrDefault(false)
             }
@@ -186,12 +195,16 @@ fun ExportSheet(
 }
 
 private fun suggestedName(format: ExportFormat): String {
-    val stamp = SimpleDateFormat("yyyy-MM-dd-HHmmss", Locale.US).format(Date())
-    val prefix = when (format) {
-        ExportFormat.LIBREVIEW -> "Mogluco-libreview"
-        ExportFormat.DATABASE -> "Mogluco-backup"
-        else -> "Mogluco-data"
+    if (format == ExportFormat.LIBREVIEW) {
+        // Mirror LibreView's own download name: <initials>_glucose_<d-M-yyyy>.csv (no leading
+        // zeros), e.g. JM_glucose_1-9-2026.csv.
+        val initials = runCatching { tk.glucodata.Engine.libreviewPatientName() }.getOrDefault("")
+            .split(" ").filter { it.isNotBlank() }.joinToString("") { it.first().uppercase() }
+        val d = SimpleDateFormat("d-M-yyyy", Locale.US).format(Date())
+        return "${initials.ifEmpty { "Mogluco" }}_glucose_$d.csv"
     }
+    val stamp = SimpleDateFormat("yyyy-MM-dd-HHmmss", Locale.US).format(Date())
+    val prefix = if (format == ExportFormat.DATABASE) "Mogluco-backup" else "Mogluco-data"
     return "$prefix-$stamp.${format.ext}"
 }
 

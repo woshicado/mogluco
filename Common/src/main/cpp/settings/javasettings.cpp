@@ -839,6 +839,28 @@ extern "C" JNIEXPORT void  JNICALL   fromjava(savelibrerubbish)(JNIEnv *env, jcl
     savefield(env,GuardianLastName, settings->data()->GuardianLastName);
     }
 
+static void unmixfield(const uint8_t *in,size_t insize,char *out) {
+    //An all-zero field was never written by savefield; unmixing it would yield mixpass garbage.
+    //Unmix at most sizeof(mixpass) bytes: the name fields are wider than the pass.
+    size_t len=(insize<sizeof(mixpass)?insize:sizeof(mixpass))-1;
+    bool stored=false;
+    for(size_t i=0;i<len;i++) {
+        if(in[i]) stored=true;
+        out[i]=in[i]^mixpass[i];
+        }
+    out[len]='\0';
+    if(!stored) out[0]='\0';
+    }
+extern "C" JNIEXPORT jstring  JNICALL   fromjava(getPatientName)(JNIEnv *env, jclass cl) {
+    char first[sizeof(settings->data()->FirstName)];
+    char last[sizeof(settings->data()->LastName)];
+    unmixfield(settings->data()->FirstName,sizeof(settings->data()->FirstName),first);
+    unmixfield(settings->data()->LastName,sizeof(settings->data()->LastName),last);
+    char buf[sizeof(first)+sizeof(last)+2];
+    snprintf(buf,sizeof(buf),"%s%s%s",first,(*first&&*last)?" ":"",last);
+    return env->NewStringUTF(buf);
+    }
+
     /*
 jstring getfield(JNIEnv *env,uint8_t *in,int len) {
     int totlen=len+1;
@@ -1054,6 +1076,8 @@ extern "C" JNIEXPORT void  JNICALL   fromjava(setlibrenum)(JNIEnv *env, jclass c
         return ;
         }
     (night?settings->data()->Nightnums:settings->data()->librenums)[index]={kind,weight};
+    if(!backup)
+        return ;
     if(night) {
         backup->sendNightNumbers();
         }

@@ -91,6 +91,7 @@ class NativeEventRepository(private val notes: EventNoteStore) : EventRepository
         // so the key written here is the one refresh() reads back.
         notes.put(atMillis / 1000L, type.index, value, note)
         refresh()
+        pushToLibreView()
     }
 
     // Events carry no stable id natively, so update = delete-the-old + log-the-new. The OLD tuple
@@ -105,12 +106,14 @@ class NativeEventRepository(private val notes: EventNoteStore) : EventRepository
         notes.remove(original.epochMillis / 1000L, original.type, original.value)
         notes.put(edited.epochMillis / 1000L, edited.type, edited.value, edited.note)
         refresh()
+        pushToLibreView()
     }
 
     override fun delete(event: LoggedEvent) {
         Engine.deleteEvent(event.epochMillis, event.type, event.value)
         notes.remove(event.epochMillis / 1000L, event.type, event.value)
         refresh()
+        pushToLibreView()
     }
 
     // Restoring a backup *merges* into the existing log: keep current events, add only those not
@@ -136,12 +139,21 @@ class NativeEventRepository(private val notes: EventNoteStore) : EventRepository
         // existed here without a note should still get the one the backup carries.
         notes.merge(events)
         refresh()
+        pushToLibreView()
     }
 
     override fun deleteBefore(millis: Long) {
         Engine.deleteEventsBefore(millis)
         notes.removeBefore(millis / 1000L)
         refresh()
+        pushToLibreView()
+    }
+
+    // Logged events ride along in the LibreView uploads (LibreEventSync); wake the upload thread
+    // so a change syncs now rather than on the next glucose-driven wake (up to 5 h away). No-op
+    // while uploading is disabled.
+    private fun pushToLibreView() {
+        Engine.uploadNow()
     }
 
     private fun refresh() {

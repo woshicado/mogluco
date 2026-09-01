@@ -19,6 +19,7 @@
 package de.mogluco.ui.export
 
 import de.mogluco.data.EventCategory
+import de.mogluco.data.isSlowInsulinLabel
 import de.mogluco.data.unit
 import de.mogluco.data.GlucosePoint
 import de.mogluco.data.GlucoseUnit
@@ -38,7 +39,7 @@ import kotlin.math.roundToInt
 enum class ExportFormat(val label: String, val description: String, val ext: String, val mime: String) {
     CSV("CSV", "Comma-separated — opens in any spreadsheet.", "csv", "text/csv"),
     TSV("TSV", "Tab-separated values.", "tsv", "text/tab-separated-values"),
-    LIBREVIEW("LibreView (CSV)", "Abbott column layout for sharing with a clinic.", "csv", "text/csv"),
+    LIBREVIEW("LibreView (CSV)", "Exact LibreView download format — as if exported from the site.", "csv", "text/csv"),
     DATABASE("Full backup", "Compressed backup of all data + settings, re-importable.", "jbak", "application/octet-stream"),
 }
 
@@ -75,6 +76,8 @@ object DataExporter {
         windowEnd: Long,
         serial: String = "",
         settings: Map<String, String> = emptyMap(),
+        libreSerial: String = "",
+        createdBy: String = "",
     ) {
         if (format == ExportFormat.DATABASE) {
             // Full backup ignores the window — it's everything — and is gzip-compressed.
@@ -87,7 +90,8 @@ object DataExporter {
             when (format) {
                 ExportFormat.CSV -> writeDelimited(w, pts, evs, unit, ",")
                 ExportFormat.TSV -> writeDelimited(w, pts, evs, unit, "\t")
-                ExportFormat.LIBREVIEW -> writeLibreView(w, pts, evs, serial)
+                ExportFormat.LIBREVIEW ->
+                    writeLibreView(w, pts, evs, unit, libreSerial.ifBlank { serial }, createdBy)
                 ExportFormat.DATABASE -> {}
             }
         }
@@ -131,69 +135,117 @@ object DataExporter {
         }
     }
 
-    /**
-     * Abbott / LibreView column layout. Each entry goes in its correctly-named column with an
-     * Abbott Record Type (0 historic glucose, 1 scan, 4 insulin, 5 food/carbs, 6 notes) rather
-     * than everything as type 6. Glucose is written in mg/dL to match the column headers. The
-     * serial number is filled from the active sensor.
-     *
-     * Note: this mirrors LibreView's *export* layout for spreadsheet/clinic review; LibreView
-     * itself has no CSV import, so a clinician opens it in their software/Excel.
-     */
-    private fun writeLibreView(w: Appendable, pts: List<GlucosePoint>, evs: List<LoggedEvent>, serial: String) {
-        // Hoisted per export call — the old `get() =` property allocated one per row.
-        val lvFmt = SimpleDateFormat("MM-dd-yyyy HH:mm", Locale.US)
-        val cols = listOf(
-            "Device", "Serial Number", "Device Timestamp", "Record Type",
-            "Historic Glucose mg/dL", "Scan Glucose mg/dL",
-            "Non-numeric Rapid-Acting Insulin", "Rapid-Acting Insulin (units)",
-            "Non-numeric Food", "Carbohydrates (grams)", "Carbohydrates (servings)",
-            "Non-numeric Long-Acting Insulin", "Long-Acting Insulin (units)", "Notes",
-        )
-        w.appendLine(cols.joinToString(","))
+    // The 21 columns of a real LibreView export, verbatim (German — the layout LibreView serves
+    // for this account; parsers key on column POSITION, and the wording must match the site's
+    // download byte-for-byte so this file can stand in for one).
+    private const val LV_HEADER =
+        "Gerät,Seriennummer,Gerätezeitstempel,Aufzeichnungstyp,Glukosewert-Verlauf mg/dL," +
+            "Glukose-Scan mg/dL,Nicht numerisches schnellwirkendes Insulin," +
+            "Schnellwirkendes Insulin (Einheiten),Nicht numerische Nahrungsdaten," +
+            "Kohlenhydrate (Gramm),Kohlenhydrate (Portionen),Nicht numerisches Depotinsulin," +
+            "Depotinsulin (Einheiten),Notizen,Glukose-Teststreifen mg/dL,Keton mmol/L," +
+            "Mahlzeiteninsulin (Einheiten),Korrekturinsulin (Einheiten)," +
+            "Insulin-Änderung durch Anwender (Einheiten),Zurückliegender Ketonwert mmol/L," +
+            "Scan-Ketonwert mmol/L"
+    private const val LV_COLS = 21
 
-        pts.forEach { p ->
-            // recordType 0 = historic glucose
-            rowAt(w, cols, lvFmt, p.epochMillis, serial, 0) { it["Historic Glucose mg/dL"] = p.calibratedMgdl.roundToInt().toString() }
+    // Column indices (0-based) in LV_HEADER.
+    private const val LV_DEVICE = 0
+    private const val LV_SERIAL = 1
+    private const val LV_TIMESTAMP = 2
+    private const val LV_RECORD_TYPE = 3
+    private const val LV_HISTORIC = 4
+    private const val LV_RAPID_UNITS = 7
+    private const val LV_CARB_GRAMS = 9
+    private const val LV_LONG_UNITS = 12
+    private const val LV_NOTES = 13
+    private const val LV_STRIP = 14
+
+    /**
+     * Byte-for-byte replica of a LibreView CSV download, so the file can be used wherever a real
+     * LibreView export would be — without uploading first. Matched against an actual account
+     * export: two-line preamble ("Glukose-Werte,Erstellt am,<UTC time> UTC,Erstellt von,<name>"
+     * then the 21 German column headers), CRLF line endings, `dd-MM-yyyy HH:mm` local timestamps,
+     * rows grouped in ascending Record Type blocks each sorted by time, insulin units as
+     * one-decimal German comma numbers (hence quoted), carbs as plain gram integers.
+     *
+     * Record types: 0 historic glucose (mg/dL), 2 strip blood glucose, 4 insulin (rapid in its
+     * column, long/Depot in its), 5 food carbs, 6 note text. LibreView never puts Notizen on a
+     * type-4/5 row, so an event's free-text note is emitted as a companion type-6 row — exactly
+     * how a note logged in the official app appears.
+     *
+     * @param serial the LibreView device identifier of this install — the value the Seriennummer
+     *   column carries for phone-app uploads in a real export (not the sensor's serial).
+     */
+    private fun writeLibreView(
+        w: Appendable,
+        pts: List<GlucosePoint>,
+        evs: List<LoggedEvent>,
+        unit: GlucoseUnit,
+        serial: String,
+        createdBy: String,
+    ) {
+        val lvFmt = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.US)
+        val utcFmt = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
         }
-        evs.forEach { e ->
-            when (e.category) {
-                EventCategory.CARBS -> rowAt(w, cols, lvFmt, e.epochMillis, serial, 5) {
-                    it["Carbohydrates (grams)"] = trim(e.value); it["Notes"] = e.note
-                }
-                EventCategory.INSULIN -> {
-                    val slow = e.label.lowercase().let { l -> "slow" in l || "long" in l || "basal" in l }
-                    rowAt(w, cols, lvFmt, e.epochMillis, serial, 4) {
-                        if (slow) it["Long-Acting Insulin (units)"] = trim(e.value)
-                        else it["Rapid-Acting Insulin (units)"] = trim(e.value)
-                        it["Notes"] = e.note
-                    }
-                }
-                else -> rowAt(w, cols, lvFmt, e.epochMillis, serial, 6) {
-                    it["Notes"] = listOf(e.label, trim(e.value), e.note).filter { s -> s.isNotEmpty() }.joinToString(" ")
+        fun line(s: String) = w.append(s).append("\r\n")
+        line("Glukose-Werte,Erstellt am,${utcFmt.format(Date())} UTC,Erstellt von,${escape(deFormula(createdBy), ",")}")
+        line(LV_HEADER)
+
+        // One-decimal comma ("4,0" / "1,5") exactly as LibreView renders insulin doses; the comma
+        // makes escape() quote the field, matching the real file.
+        fun germanUnits(v: Float) = String.format(Locale.GERMANY, "%.1f", v)
+        fun row(time: Long, recordType: Int, fill: (Array<String>) -> Unit) {
+            val f = Array(LV_COLS) { "" }
+            f[LV_DEVICE] = "FreeStyle Libre 3"
+            f[LV_SERIAL] = serial
+            f[LV_TIMESTAMP] = lvFmt.format(Date(time))
+            f[LV_RECORD_TYPE] = recordType.toString()
+            fill(f)
+            // Notizen is the only free-text (user-written) column — formula-injection hardened.
+            f[LV_NOTES] = deFormula(f[LV_NOTES])
+            line(f.joinToString(",") { escape(it, ",") })
+        }
+
+        // A real export is written in ascending Record Type blocks, each time-sorted. Collect the
+        // note rows (own note events + free-text companions of typed rows) to sort them together.
+        pts.forEach { p ->
+            row(p.epochMillis, 0) { it[LV_HISTORIC] = p.calibratedMgdl.roundToInt().toString() }
+        }
+        val notes = mutableListOf<Pair<Long, String>>()
+        fun noteFor(e: LoggedEvent) {
+            if (e.note.isNotEmpty()) notes += e.epochMillis to e.note
+        }
+        evs.filter { it.category == EventCategory.BLOOD }.forEach { e ->
+            // Blood values are entered in the display unit; the column is mg/dL.
+            val mgdl = if (unit == GlucoseUnit.MMOLL) e.value * 18.0182 else e.value.toDouble()
+            row(e.epochMillis, 2) { it[LV_STRIP] = mgdl.roundToInt().toString() }
+            noteFor(e)
+        }
+        evs.filter { it.category == EventCategory.INSULIN }.forEach { e ->
+            row(e.epochMillis, 4) {
+                it[if (isSlowInsulinLabel(e.label)) LV_LONG_UNITS else LV_RAPID_UNITS] = germanUnits(e.value)
+            }
+            noteFor(e)
+        }
+        evs.filter { it.category == EventCategory.CARBS }.forEach { e ->
+            row(e.epochMillis, 5) {
+                it[LV_CARB_GRAMS] = if (e.value == e.value.toLong().toFloat()) {
+                    e.value.toLong().toString()
+                } else {
+                    germanUnits(e.value)
                 }
             }
+            noteFor(e)
         }
-    }
-
-    private fun rowAt(
-        w: Appendable,
-        cols: List<String>,
-        fmt: SimpleDateFormat,
-        time: Long,
-        serial: String,
-        recordType: Int,
-        fill: (MutableMap<String, String>) -> Unit,
-    ) {
-        val m = linkedMapOf<String, String>().apply { cols.forEach { put(it, "") } }
-        m["Device"] = "Mogluco"
-        m["Serial Number"] = serial
-        m["Device Timestamp"] = fmt.format(Date(time))
-        m["Record Type"] = recordType.toString()
-        fill(m)
-        // Notes is the only free-text (user-written) column — harden it against formula injection.
-        m["Notes"] = deFormula(m["Notes"].orEmpty())
-        w.appendLine(cols.joinToString(",") { escape(m[it].orEmpty(), ",") })
+        evs.filter { it.category == EventCategory.ACTIVITY || it.category == EventCategory.OTHER }.forEach { e ->
+            notes += e.epochMillis to
+                listOf(e.label, trim(e.value), e.note).filter { s -> s.isNotEmpty() }.joinToString(" ")
+        }
+        notes.sortedBy { it.first }.forEach { (t, text) ->
+            row(t, 6) { it[LV_NOTES] = text }
+        }
     }
 
     // --- Backup (gzip) + import ---
