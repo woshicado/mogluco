@@ -63,9 +63,22 @@ class MessageReceiver : WearableListenerService() {
                 }
             }
             MessageSender.START_PATH -> {
-                if (isWearable) UseWifi.usewifi()
                 Applic.initStarted = Natives.ontbytesettings(data)
                 Log.i(LOG_ID, "START_PATH initStarted=" + Applic.initStarted)
+                if (isWearable) {
+                    // Only hold the forced Wi-Fi network when the mirror is configured to use it
+                    // (same gate as WatchLink.init). Requested unconditionally, nothing ever
+                    // released it: the watch kept Wi-Fi up/scanning around the clock even though
+                    // the Data-Layer tunnel carries all mirror traffic (ALLGALAXY) — a large,
+                    // system-attributed battery drain. Read after ontbytesettings so the phone's
+                    // just-delivered setting decides.
+                    if (runCatching { Natives.getWifi() }.getOrDefault(false)) {
+                        UseWifi.usewifi()
+                    } else {
+                        UseWifi.stopusewifi()
+                    }
+                    if (Applic.initStarted) WatchLink.markBootstrapped()
+                }
                 // Settings + roles just changed underneath the repositories — refresh.
                 Engine.dispatchInvalidate()
                 sendnetinfo(messageEvent.sourceNodeId)

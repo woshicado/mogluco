@@ -250,10 +250,17 @@ public class Libre3GattCallback extends SuperGattCallback {
               + "onConnectionStateChange ERROR: disconnected with status : "
               + status);
       // libre3BLESensor.access$600(libre3BLESensor.this, status);
+      // Upstream parity: a pending 5 s queue-retry must not fire into the next connection.
+      cancelretrytimer();
       constatchange[1] = tim;
       setConStatus(status);
       if (lastphase5) {
-        if (status == 19) {
+        // A remote terminate (19) right after the phase-5 resume can mean the stored auth key is
+        // no longer accepted — but it is also an ordinary link drop. Upstream only forgets the key
+        // when no reading arrived in the last 59 s; wiping it on every 19 forced a full re-auth
+        // after any transient drop, and on the watch that left the sensor in a connect →
+        // terminate-after-2.5 s loop every minute until it was handed back to the phone.
+        if (status == 19 && (tim - datatime) >= 59000) {
           isPreAuthorized = false;
           Natives.setLibre3kAuth(sensorptr, null);
         }
@@ -678,7 +685,24 @@ public class Libre3GattCallback extends SuperGattCallback {
             ? (((PowerManager) app.getSystemService(POWER_SERVICE))
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mogluco::Libre3"))
             : null;
-    if (wakelock != null) wakelock.acquire();
+    // Bounded and always released: an exception in any handler below used to leak this partial
+    // wakelock for the life of the process (CPU never sleeps → severe battery drain).
+    if (wakelock != null) wakelock.acquire(10_000L);
+    try {
+      handleCharacteristicChanged(characteristic, value);
+    } finally {
+      if (wakelock != null && wakelock.isHeld()) wakelock.release();
+    }
+    {
+      if (doLog) {
+        Log.i(LOG_ID, SerialNumber + ": " + "onCharacteristicChanged end");
+      }
+      ;
+    }
+    ;
+  }
+
+  private void handleCharacteristicChanged(BluetoothGattCharacteristic characteristic, byte[] value) {
     UUID uuid = characteristic.getUuid();
     //      {if(doLog){      showbytes(LOG_ID+" onCharacteristicChanged Start "+uuid.toString(),
     // value);};}
@@ -729,14 +753,6 @@ public class Libre3GattCallback extends SuperGattCallback {
       dodisconnect(mBluetoothGatt);
       disconnected(1042);
     }
-    if (wakelock != null) wakelock.release();
-    {
-      if (doLog) {
-        Log.i(LOG_ID, SerialNumber + ": " + "onCharacteristicChanged end");
-      }
-      ;
-    }
-    ;
   }
 
   // source /n/ojka/tmp/libre3.3.0/sensor/newsensor/working
@@ -1272,6 +1288,9 @@ public class Libre3GattCallback extends SuperGattCallback {
     return true;
   }
 
+  /** Wall time of the last decoded one-minute reading; gates the auth-key wipe on status 19. */
+  private long datatime = 0L;
+
   private int oneMinuteReadingSize = 0;
   //    private int oneMinutePacketNumber = 0;
   private final byte[] oneMinuteRawData = new byte[35];
@@ -1296,6 +1315,7 @@ public class Libre3GattCallback extends SuperGattCallback {
       }
       long res = Natives.saveLibre3MinuteL(this.sensorptr, decr);
       handleGlucoseResult(res, timmsec);
+      datatime = timmsec;
 
       this.mBluetoothGatt.readRemoteRssi();
     }

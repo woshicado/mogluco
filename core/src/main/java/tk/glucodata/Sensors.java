@@ -120,6 +120,29 @@ public final class Sensors {
         SensorBluetooth.reconnectall();
     }
 
+    /**
+     * Reconnect watchdog for a device that owns the sensor's BLE link but has stopped receiving
+     * readings. Upstream re-armed a loss-of-signal alarm whose handler began with
+     * {@code SensorBluetooth.reconnectall()}; the redesign dropped that alarm, so a link that
+     * stalled without a clean disconnect (failed service discovery, a handshake that never
+     * completes, a null connectGatt) was never retried. No-op unless this device owns the link
+     * ({@code usebluetooth}); rebuilds the BLE manager if it was torn down. Each sensor's
+     * {@link SuperGattCallback#reconnect} only acts when its own data is stale, so a kick on a
+     * healthy link does nothing.
+     */
+    public static void watchdogKick() {
+        if (!Natives.getusebluetooth()) {
+            return;
+        }
+        if (SensorBluetooth.blueone == null) {
+            Log.i(LOG_ID, "watchdog: no BLE manager while owning the sensor — starting it");
+            SensorBluetooth.start(true);
+        } else {
+            Log.i(LOG_ID, "watchdog: readings stale — reconnecting");
+            SensorBluetooth.reconnectall();
+        }
+    }
+
     /** Connect immediately to the active device (used after a manual NFC re-tap). */
     public static void goScan() {
         SensorBluetooth.goscan();

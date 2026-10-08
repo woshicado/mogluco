@@ -46,6 +46,8 @@ import de.mogluco.wear.complication.ArrowComplicationService
 import de.mogluco.wear.complication.NumberArrowComplicationService
 import de.mogluco.wear.complication.NumberComplicationService
 import de.mogluco.wear.tile.GlucoseTileService
+import tk.glucodata.Natives
+import tk.glucodata.Sensors
 
 /**
  * The watch's keep-alive + fan-out service: holds the process for BLE/mirror data, keeps an
@@ -59,6 +61,9 @@ class WearGlucoseService : LifecycleService() {
 
     /** What the surfaces last rendered ("124 →" / "--"); gates redundant update pushes. */
     private var lastPushedKey: String? = null
+
+    /** Elapsed realtime of the last reconnect kick; seeded at start so the first waits one interval. */
+    private var lastWatchdogKickElapsed = android.os.SystemClock.elapsedRealtime()
 
     override fun onCreate() {
         super.onCreate()
@@ -98,11 +103,30 @@ class WearGlucoseService : LifecycleService() {
                         TileService.getUpdater(this@WearGlucoseService)
                             .requestUpdate(GlucoseTileService::class.java)
                     }
-                    val reading = snapshot.reading ?: break
-                    val untilStale =
-                        GlucoseSnapshot.STALE_MILLIS - reading.ageMillis(System.currentTimeMillis())
-                    if (untilStale <= 0) break // already stale; nothing left to age
-                    delay(untilStale + 1_000) // +1 s so the re-check lands past the boundary
+                    val untilStale = snapshot.reading?.let {
+                        GlucoseSnapshot.STALE_MILLIS - it.ageMillis(System.currentTimeMillis())
+                    } ?: 0L
+                    if (untilStale > 0) {
+                        delay(untilStale + 1_000) // +1 s so the re-check lands past the boundary
+                        continue
+                    }
+                    // Stale (or nothing yet). When this watch owns the sensor's BLE link, nudge a
+                    // reconnect now and every few minutes until data flows again (a new reading
+                    // cancels this via collectLatest). Mirror-only watches stop here as before.
+                    if (!ownsSensorLink()) break
+                    // Spaced globally (re-emissions of the combine restart this loop) and never
+                    // sooner than one interval after the service started, so boot/warm-up and
+                    // history reloads don't trigger back-to-back reconnects. Expired sensors are
+                    // left alone (nothing to reconnect to; avoids an endless rescan).
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val wait = lastWatchdogKickElapsed + WATCHDOG_INTERVAL_MS - now
+                    if (wait > 0) {
+                        delay(wait)
+                        continue
+                    }
+                    lastWatchdogKickElapsed = now
+                    if (repo.currentSensor?.isExpired() != true) runCatching { Sensors.watchdogKick() }
+                    delay(WATCHDOG_INTERVAL_MS)
                 }
             }
         }
@@ -140,6 +164,9 @@ class WearGlucoseService : LifecycleService() {
             startAsForeground(snapshot)
         }
     }
+
+    private fun ownsSensorLink(): Boolean =
+        runCatching { Natives.getusebluetooth() }.getOrDefault(false)
 
     private fun chipText(snapshot: GlucoseSnapshot.Snapshot?): String {
         if (snapshot == null) return "--"
@@ -203,6 +230,9 @@ class WearGlucoseService : LifecycleService() {
 
     companion object {
         private const val CHANNEL_ID = "wear_glucose_ongoing"
+
+        /** Reconnect-kick spacing while this watch owns the sensor but readings are stale. */
+        private const val WATCHDOG_INTERVAL_MS = 5 * 60_000L
         private const val NOTIF_ID = 0x91
 
         fun start(context: Context) {

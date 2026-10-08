@@ -77,11 +77,18 @@ object WatchLink {
     @Volatile private var watchOwnedSinceMillis = 0L
 @Volatile private var knownNodeIds: Set<String> = emptySet()
 
+    /** Watch: the store already held data at process start, so no /askforstart bootstrap ran. */
+    @Volatile private var dataAtStart = false
+
+    /** Last network-change-triggered /catchup (elapsed realtime); throttles connectivity churn. */
+    @Volatile private var lastNetworkCatchupElapsed = 0L
+
     /** False while the app runs on sample data (no engine → no mirror). */
     val isInitialized: Boolean get() = initialized
 
     /** Watch side: true once the phone's /start bootstrap arrived. */
-    val initStarted: Boolean get() = Applic.initStarted
+    /** True once the watch is set up: settings arrived this run, or it already held data at start. */
+    val initStarted: Boolean get() = Applic.initStarted || dataAtStart
 
     /**
      * Boot the link. Call once from Application.onCreate, AFTER Engine.start() (netinfo
@@ -112,15 +119,27 @@ object WatchLink {
         registerNetworkCallback(app)
         if (Applic.isWearable) {
             if (runCatching { Natives.getWifi() }.getOrDefault(false)) UseWifi.usewifi()
-            // Legacy watch bootstrap (Applic.initproc): ask the phone to init us every 30 s
-            // until the /start settings arrive.
-            scope.launch {
-                delay(4_000)
-                while (isActive && !Applic.initStarted) {
-                    MessageSender.sendaskforstart()
-                    delay(30_000)
-                }
+            // Legacy watch bootstrap (Applic.initproc): ask the phone to init us every 30 s until
+            // the /start settings arrive — but ONLY while the watch was never set up (upstream
+            // gated this on `!hasData()`). Asking on every process start made the phone answer
+            // with resetbylabel(remake=true), which rebuilds this watch's mirror slot as "phone
+            // streams to watch" and could silently take the sensor role away from a watch that
+            // owned it (plus a full re-sync and a forced-Wi-Fi /start after every restart).
+            // Upstream's hasData() is also true on a pristine store (default event labels), so
+            // the test here is "settings were received before" or "the store knows a sensor".
+            dataAtStart = prefs?.getBoolean(KEY_BOOTSTRAPPED, false) == true ||
+                runCatching { !Natives.activeSensors().isNullOrEmpty() }.getOrDefault(false)
+            if (dataAtStart) {
                 MessageSender.sendnetinfo()
+            } else {
+                scope.launch {
+                    delay(4_000)
+                    while (isActive && !Applic.initStarted) {
+                        MessageSender.sendaskforstart()
+                        delay(30_000)
+                    }
+                    MessageSender.sendnetinfo()
+                }
             }
         } else {
             MessageSender.sendnetinfo()
@@ -145,10 +164,19 @@ object WatchLink {
                         Applic.wakemirrors()
                         // Connectivity came back — pull any readings that arrived on the peer while
                         // we were offline (the mirror stream only resumes from "now" going forward).
-                        // Delayed so the mirror re-handshake above settles first.
-                        Applic.scheduler.schedule(
-                            { runCatching { MessageSender.sendCatchup() } }, 8, TimeUnit.SECONDS,
-                        )
+                        // Delayed so the mirror re-handshake above settles first. Throttled: every
+                        // Wi-Fi/cellular/proxy handover lands here, and each catch-up makes the peer
+                        // walk and ship up to a day of history. A real reconnect after a peer drop is
+                        // still covered unthrottled by onNodesChanged and the manual Re-sync.
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (lastNetworkCatchupElapsed == 0L ||
+                            now - lastNetworkCatchupElapsed >= NETWORK_CATCHUP_MIN_INTERVAL_MS
+                        ) {
+                            lastNetworkCatchupElapsed = now
+                            Applic.scheduler.schedule(
+                                { runCatching { MessageSender.sendCatchup() } }, 8, TimeUnit.SECONDS,
+                            )
+                        }
                     }
 
                     override fun onLost(network: Network) {
@@ -327,6 +355,12 @@ object WatchLink {
                 Log.e(LOG_ID, "transfer: getmynetinfo=null")
                 return@launch
             }
+            // A new hand-off supersedes any earlier reclaim. The persisted "order the watch's BLE
+            // off when it reappears" marker from a previous take-back/timeout must not survive into
+            // this transfer — otherwise the next Data-Layer node event (any brief watch↔phone BT
+            // drop) sends /bluetooth off to the watch that now owns the sensor, and readings stop
+            // with the phone still believing the watch has them.
+            clearNeedsBluetoothOff()
             transferStartMillis = System.currentTimeMillis()
             val deadline = transferStartMillis + timeoutMillis
             _transferState.value = TransferState.AwaitingWatchConfirm(nodeId, deadline)
@@ -535,8 +569,22 @@ object WatchLink {
             scope.launch { runCatching { MessageSender.sendCatchup() } }
         }
         // A reclaimed-from watch just reappeared: order its BLE off before it can compete
-        // with the phone for the sensor connection.
+        // with the phone for the sensor connection. Never while the watch is (becoming) the
+        // owner — a stale marker must not cut off the device that is streaming right now.
         val needsOff = prefs?.getString(KEY_NEEDS_BT_OFF, null) ?: return
+        val st = _transferState.value
+        val ownerNode = when (st) {
+            is TransferState.WatchHasSensor -> st.nodeId
+            is TransferState.AwaitingWatchConfirm -> st.nodeId
+            else -> null
+        }
+        // Only when the marker names the very watch that now (re)owns the sensor; a marker for a
+        // DIFFERENT, reclaimed-from watch must still be delivered when that watch reappears.
+        if (ownerNode != null && ownerNode == needsOff) {
+            Log.i(LOG_ID, "dropping stale bluetooth-off marker for $needsOff — that watch owns the sensor")
+            clearNeedsBluetoothOff()
+            return
+        }
         if (ns.any { it.id == needsOff }) {
             Log.i(LOG_ID, "reappeared after reclaim — sending bluetooth-off to $needsOff")
             scope.launch {
@@ -546,6 +594,15 @@ object WatchLink {
                 }.onFailure { Log.stack(LOG_ID, "post-reclaim bluetooth-off", it) }
             }
         }
+    }
+
+    /** Watch: the phone's /start settings arrived — later process starts skip the bootstrap. */
+    internal fun markBootstrapped() {
+        prefs?.edit()?.putBoolean(KEY_BOOTSTRAPPED, true)?.apply()
+    }
+
+    private fun clearNeedsBluetoothOff() {
+        prefs?.edit()?.remove(KEY_NEEDS_BT_OFF)?.apply()
     }
 
     /** From Applic.switchbluetooth (Java) — the native sBlueWatch ack (watch announced
@@ -583,6 +640,7 @@ object WatchLink {
                 return
             }
             Log.i(LOG_ID, "watch $nodeId confirmed sensor ownership")
+            clearNeedsBluetoothOff()
             watchOwnedSinceMillis = System.currentTimeMillis()
             _transferState.value = TransferState.WatchHasSensor(nodeId)
             persistWatchNode(nodeId)
@@ -686,6 +744,7 @@ object WatchLink {
     }
 
     private const val KEY_WATCH_NODE = "watch_node_id"
+    private const val KEY_BOOTSTRAPPED = "watch_bootstrapped"
     private const val KEY_NEEDS_BT_OFF = "watch_needs_bt_off"
     private const val KEY_PENDING_NODE = "pending_transfer_node"
     private const val KEY_PENDING_DEADLINE = "pending_transfer_deadline"
@@ -699,6 +758,9 @@ object WatchLink {
     // visible gap for anything longer, so cover a full day. [CATCHUP_MAX_POINTS] caps the packed
     // payload well under the Data-Layer message limit regardless of window.
     const val CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000L
+
+    /** Minimum spacing of connectivity-triggered catch-ups (see registerNetworkCallback). */
+    private const val NETWORK_CATCHUP_MIN_INTERVAL_MS = 10 * 60_000L
 
     // Cap the catch-up batch so the packed payload (4 + n*12 bytes) stays comfortably under the
     // ~100 KB Data-Layer message limit even at 1-minute resolution over the whole window.
