@@ -236,7 +236,8 @@ object AlarmController {
     }
 
     private fun repeatMillis(): Long = app.preferences.alarmRepeatMinutes.value.coerceAtLeast(0) * 60_000L
-    private fun testTimeout(): Int = app.preferences.alarmTimeoutSeconds.value.coerceIn(10, 600)
+    // 0 = until dismissed carries over to the test, so it behaves exactly like a real alarm.
+    private fun testTimeout(): Int = app.preferences.alarmTimeoutSeconds.value.let { if (it <= 0) 0 else it.coerceIn(10, 600) }
 
     private fun title(kind: Kind) = when (kind) {
         Kind.LOW -> "Low glucose"

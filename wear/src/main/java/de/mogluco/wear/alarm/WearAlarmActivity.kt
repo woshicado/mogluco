@@ -19,11 +19,14 @@
 package de.mogluco.wear.alarm
 
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.lifecycleScope
+import androidx.wear.ambient.AmbientLifecycleObserver
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -55,10 +58,39 @@ class WearAlarmActivity : ComponentActivity() {
     // relaunch or a newer ringing state) — the surface must always show the CURRENT alarm.
     private val shown = mutableStateOf(WearAlarmService.RingingAlarm("Glucose alarm", ""))
 
+    /** Uptime of the last ambient ENTER; a leave hint right after one is the system's. */
+    @Volatile private var lastAmbientEnterUptime = 0L
+
+    /** Drives the low-power ambient layout (dim text only, no colored fills — OLED-safe). */
+    private val ambient = mutableStateOf(false)
+
+    // Ambient support is what keeps an unattended alarm alive: without it, Wear OS brings the
+    // watch face forward as soon as the display dims (screen-off timeout, wrist down, bedtime),
+    // which fires onUserLeaveHint exactly like a crown press did — and that dismissed the alarm
+    // after ~one vibration cycle. Ambient-aware, the surface simply stays on top while dimmed.
+    private val ambientObserver = AmbientLifecycleObserver(
+        this,
+        object : AmbientLifecycleObserver.AmbientLifecycleCallback {
+            override fun onEnterAmbient(ambientDetails: AmbientLifecycleObserver.AmbientDetails) {
+                lastAmbientEnterUptime = SystemClock.uptimeMillis()
+                ambient.value = true
+            }
+
+            override fun onUpdateAmbient() {}
+
+            // Not stamped: a crown press while dimmed wakes us (exit) and may go Home right after —
+            // that is a real dismiss and must not fall inside a grace window.
+            override fun onExitAmbient() {
+                ambient.value = false
+            }
+        },
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setShowWhenLocked(true)
         setTurnScreenOn(true)
+        lifecycle.addObserver(ambientObserver)
 
         readIntent(intent)
         // Track the ringing state: close when the alarm ends without user action here (dismissed
@@ -74,6 +106,21 @@ class WearAlarmActivity : ComponentActivity() {
         setContent {
             WearTheme {
                 val (title, text) = shown.value
+                if (ambient.value) {
+                    // Ambient: grey text on black, no icon/buttons — the alarm may sit on the
+                    // always-on display for a long time (it rings until dismissed).
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text(title, style = MaterialTheme.typography.titleLarge, color = androidx.compose.ui.graphics.Color.LightGray)
+                        if (text.isNotEmpty()) {
+                            Text(text, style = MaterialTheme.typography.bodyMedium, color = androidx.compose.ui.graphics.Color.Gray)
+                        }
+                    }
+                    return@WearTheme
+                }
                 Column(
                     modifier = Modifier.fillMaxSize().padding(12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -138,6 +185,12 @@ class WearAlarmActivity : ComponentActivity() {
 
     override fun onStop() {
         visible = false
+        // Pushed into the background while still ringing (a leave that wasn't a crown press, or the
+        // system covering us): ask the service to bring the surface back so the alarm never rings
+        // on an unrelated screen with nothing to dismiss it from.
+        if (!isFinishing && WearAlarmService.ringing.value != null) {
+            WearAlarmService.requestSurface(this)
+        }
         super.onStop()
     }
 
@@ -149,20 +202,33 @@ class WearAlarmActivity : ComponentActivity() {
     }
 
     /**
-     * Dismiss when the user leaves the alarm screen — this is how a crown press dismisses the alarm.
+     * Dismiss when the USER leaves the alarm screen — this is how a crown press dismisses the alarm.
      *
      * On the Pixel Watch the crown short-press is claimed by the system as the Home action (like
      * HOME on a phone): it is handled at the framework level and never reaches [onKeyDown], so we
-     * can't intercept the key. But leaving to Home fires [onUserLeaveHint], and crucially it does
-     * NOT fire on a screen-off/sleep or when another activity covers us — so "user pressed the crown
-     * to go home" cleanly maps to "dismiss", while an unattended alarm keeps ringing.
+     * can't intercept the key. Leaving to Home fires [onUserLeaveHint] — but so does the system
+     * bringing the watch face forward when the display dims or sleeps (verified on a Pixel Watch 3:
+     * the alarm screen was replaced by the watch face exactly at the 10 s screen-off timeout and the
+     * alarm was dismissed after one vibration cycle). So a leave hint only counts as a crown press
+     * when the screen is interactive, we're not ambient, and no ambient transition just happened.
+     * Anything else leaves the alarm ringing; the service keeps vibrating until a real dismiss.
      *
      * [finish] from the on-screen Dismiss/Snooze buttons does not trigger onUserLeaveHint, so it
      * won't override a snooze.
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        WearAlarmService.dismiss(this)
+        if (isDeliberateLeave()) WearAlarmService.dismiss(this)
+    }
+
+    private fun isDeliberateLeave(): Boolean {
+        if (ambientObserver.isAmbient) return false
+        val interactive = runCatching {
+            getSystemService(PowerManager::class.java).isInteractive
+        }.getOrDefault(false)
+        if (!interactive) return false
+        val sinceAmbient = SystemClock.uptimeMillis() - lastAmbientEnterUptime
+        return lastAmbientEnterUptime == 0L || sinceAmbient > AMBIENT_GRACE_MS
     }
 
     /**
@@ -182,6 +248,9 @@ class WearAlarmActivity : ComponentActivity() {
     }
 
     companion object {
+        /** A leave hint this soon after entering ambient is the system's, not the crown. */
+        private const val AMBIENT_GRACE_MS = 1_500L
+
         /** Whether the surface is currently on screen — gates the service's launch retries. */
         @Volatile
         var visible: Boolean = false

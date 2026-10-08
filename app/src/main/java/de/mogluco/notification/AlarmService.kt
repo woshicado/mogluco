@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
@@ -22,6 +24,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import de.mogluco.MoglucoApp
 import de.mogluco.data.VibrationPattern
 
@@ -43,6 +46,26 @@ class AlarmService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val autoStop = Runnable { stopRinging(byTimeout = true) }
 
+    // Android cancels a non-system app's vibration when the screen turns off for most reasons other
+    // than the plain timeout (power key, proximity, a gesture) — even with USAGE_ALARM — while the
+    // looping sound keeps playing. Re-issue the waveform shortly after each screen-off while ringing,
+    // under a short wakelock so the delayed post runs even if the device would otherwise suspend.
+    private var ringPattern: VibrationPattern? = null
+    private val rearmVibration = Runnable {
+        val vib = vibrator
+        val pattern = ringPattern
+        if (vib != null && pattern != null) playWaveform(vib, pattern)
+        runCatching { if (rearmWakeLock?.isHeld == true) rearmWakeLock?.release() }
+    }
+    private var screenOffReceiver: BroadcastReceiver? = null
+    private val rearmWakeLock: PowerManager.WakeLock? by lazy {
+        runCatching {
+            getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "juggluco:alarm-rearm")
+                .apply { setReferenceCounted(false) }
+        }.getOrNull()
+    }
+
     private var title: String = "Glucose alarm"
     private var text: String = ""
 
@@ -62,7 +85,9 @@ class AlarmService : Service() {
         }
         title = intent?.getStringExtra(EXTRA_TITLE) ?: title
         text = intent?.getStringExtra(EXTRA_TEXT) ?: text
-        val timeoutSec = intent?.getIntExtra(EXTRA_TIMEOUT_SEC, 60) ?: 60
+        // 0 = until dismissed. A START_STICKY restart (null intent) after process death keeps
+        // ringing until dismissed rather than going quiet after a guessed duration.
+        val timeoutSec = intent?.getIntExtra(EXTRA_TIMEOUT_SEC, 0) ?: 0
 
         ensureChannel(this)
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -138,25 +163,59 @@ class AlarmService : Service() {
             val vib = currentVibrator()
             vibrator = vib
             val pattern: VibrationPattern = prefs.vibrationPattern.value
-            // repeatIndex 0 → loop the whole waveform until cancelled. Alarm-usage attributes
-            // keep the vibration exempt from DND/ringer policies even when the interruption-
-            // filter lift above wasn't available (no policy access granted).
-            runCatching {
-                val effect = VibrationEffect.createWaveform(pattern.timings, 0)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    vib.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vib.vibrate(
-                        effect,
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build(),
-                    )
-                }
+            ringPattern = pattern
+            playWaveform(vib, pattern)
+            registerScreenOffRearm()
+        }
+    }
+
+    /**
+     * Start (or restart) the looping alarm waveform. repeatIndex 0 → loop the whole waveform until
+     * cancelled. Alarm-usage attributes keep the vibration exempt from DND/ringer policies even when
+     * the interruption-filter lift wasn't available (no policy access granted).
+     */
+    private fun playWaveform(vib: Vibrator, pattern: VibrationPattern) {
+        runCatching {
+            val effect = VibrationEffect.createWaveform(pattern.timings, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                vib.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+            } else {
+                @Suppress("DEPRECATION")
+                vib.vibrate(
+                    effect,
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                )
+            }
+        }.onFailure { android.util.Log.w(TAG, "alarm vibration failed", it) }
+    }
+
+    private fun registerScreenOffRearm() {
+        if (screenOffReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                // Let the platform's screen-off cancellation land first, then restart the pattern.
+                runCatching { rearmWakeLock?.acquire(2_000L) }
+                handler.removeCallbacks(rearmVibration)
+                handler.postDelayed(rearmVibration, REARM_DELAY_MS)
             }
         }
+        // ACTION_SCREEN_OFF is a protected system broadcast; NOT_EXPORTED still receives it.
+        runCatching {
+            ContextCompat.registerReceiver(
+                this, receiver, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            screenOffReceiver = receiver
+        }.onFailure { android.util.Log.w(TAG, "screen-off re-arm unavailable", it) }
+    }
+
+    private fun unregisterScreenOffRearm() {
+        handler.removeCallbacks(rearmVibration)
+        runCatching { if (rearmWakeLock?.isHeld == true) rearmWakeLock?.release() }
+        screenOffReceiver?.let { r -> runCatching { unregisterReceiver(r) } }
+        screenOffReceiver = null
     }
 
     /**
@@ -209,8 +268,10 @@ class AlarmService : Service() {
             runCatching { p.release() }
         }
         player = null
+        unregisterScreenOffRearm()
         runCatching { vibrator?.cancel() }
         vibrator = null
+        ringPattern = null
         restoreInterruptionFilter()
         runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
         wakeLock = null
@@ -221,6 +282,7 @@ class AlarmService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterScreenOffRearm()
         runCatching { player?.release() }
         runCatching { vibrator?.cancel() }
         restoreInterruptionFilter()
@@ -273,6 +335,9 @@ class AlarmService : Service() {
 
     companion object {
         private const val TAG = "AlarmService"
+
+        /** Delay after a screen-off before re-issuing the waveform (after the platform cancels it). */
+        private const val REARM_DELAY_MS = 300L
         private const val CHANNEL_ID = "glucose_alarm_v1"
         private const val FALLBACK_CHANNEL_ID = "glucose_alarm_fallback"
         private const val NOTIF_ID = 0xA1A2

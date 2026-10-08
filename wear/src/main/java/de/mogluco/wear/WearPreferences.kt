@@ -135,7 +135,8 @@ class WearPreferences(context: Context) : DisplayPrefs {
     val wearRepeatMinutes: StateFlow<Long> = _wearRepeatMin.flow
     private val _wearSnoozeMin = LongPref("wear_snooze_min", 30)
     val wearSnoozeMinutes: StateFlow<Long> = _wearSnoozeMin.flow
-    private val _wearTimeoutSec = LongPref("wear_timeout_sec", 60)
+    // 0 = ring until dismissed (default): an unattended night-time alarm must keep going.
+    private val _wearTimeoutSec = LongPref("wear_timeout_sec", 0)
     val wearTimeoutSeconds: StateFlow<Long> = _wearTimeoutSec.flow
 
     fun applyWearAlarm(repeatMin: Int, snoozeMin: Int, timeoutSec: Int) {

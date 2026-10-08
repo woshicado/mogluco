@@ -290,10 +290,11 @@ fun WatchScreen(
                 onPlus = { val v = (waSnooze + 5).coerceIn(0, 240); prefs.setWatchAlarmSnooze(v); WatchLink.pushWearAlarm(waRepeat, v, waTimeout) },
                 onValueClick = { editWatchAlarm = "snooze" },
             )
+            // 0 = ring until dismissed, the step below 15 s.
             StepperRow(
-                "Alarm duration", null, "$waTimeout s",
-                onMinus = { val v = (waTimeout - 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
-                onPlus = { val v = (waTimeout + 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
+                "Alarm duration", null, if (waTimeout == 0) "Until dismissed" else "$waTimeout s",
+                onMinus = { val v = if (waTimeout < 30) 0 else (waTimeout - 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
+                onPlus = { val v = if (waTimeout <= 0) 15 else (waTimeout + 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
                 onValueClick = { editWatchAlarm = "timeout" },
             )
         }
@@ -305,7 +306,7 @@ fun WatchScreen(
                 title = when (which) {
                     "repeat" -> "Watch repeat (min)"
                     "snooze" -> "Watch snooze (min)"
-                    else -> "Watch alarm duration (s)"
+                    else -> "Watch alarm duration (s, 0 = until dismissed)"
                 },
                 initial = when (which) {
                     "repeat" -> waRepeat
@@ -317,7 +318,7 @@ fun WatchScreen(
                     when (which) {
                         "repeat" -> { val x = v.coerceIn(0, 240); prefs.setWatchAlarmRepeat(x); WatchLink.pushWearAlarm(x, waSnooze, waTimeout) }
                         "snooze" -> { val x = v.coerceIn(0, 240); prefs.setWatchAlarmSnooze(x); WatchLink.pushWearAlarm(waRepeat, x, waTimeout) }
-                        else -> { val x = v.coerceIn(15, 600); prefs.setWatchAlarmTimeout(x); WatchLink.pushWearAlarm(waRepeat, waSnooze, x) }
+                        else -> { val x = if (v <= 0) 0 else v.coerceIn(15, 600); prefs.setWatchAlarmTimeout(x); WatchLink.pushWearAlarm(waRepeat, waSnooze, x) }
                     }
                 },
                 onDismiss = { editWatchAlarm = null },

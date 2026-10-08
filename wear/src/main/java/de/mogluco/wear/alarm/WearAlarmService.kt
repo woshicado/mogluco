@@ -23,8 +23,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -48,7 +50,7 @@ import de.mogluco.wear.WearApp
  * The ringing half of the watch alarm (port of the phone's AlarmService, vibration-first):
  * loops a strong vibration waveform (and the system alarm tone if enabled), wakes the
  * screen, posts a full-screen high-importance notification with Dismiss/Snooze, honors the
- * "ring through DND" preference, and auto-silences after a timeout.
+ * "ring through DND" preference, and rings until dismissed unless a timeout is configured.
  */
 class WearAlarmService : Service() {
 
@@ -61,6 +63,36 @@ class WearAlarmService : Service() {
     // even when it's permitted; retry while the alarm still rings and no surface came up.
     private val relaunch = Runnable {
         if (_ringing.value != null && !WearAlarmActivity.visible) launchAlarmScreen()
+    }
+
+    // While ringing with the surface gone (backgrounded without a dismiss), keep trying to bring it
+    // back on a slow cadence; the screen-on receiver below covers "user raised the wrist".
+    private val keepSurface = object : Runnable {
+        override fun run() {
+            if (_ringing.value == null) return
+            if (!WearAlarmActivity.visible) launchAlarmScreen()
+            handler.postDelayed(this, SURFACE_RETRY_MS)
+        }
+    }
+
+    // The platform cancels a non-system app's vibration when the screen turns off for most reasons
+    // other than the plain timeout (power key, palm cover, wrist gesture, bedtime mode) — even with
+    // USAGE_ALARM. A ringing alarm must survive that, so re-issue the waveform shortly after every
+    // screen-off while we're still ringing. Restarting the pattern is harmless if it wasn't cut.
+    private val rearmVibration = Runnable {
+        vibrator?.let(::playWaveform)
+        runCatching { if (rearmWakeLock?.isHeld == true) rearmWakeLock?.release() }
+    }
+    private var screenOffReceiver: BroadcastReceiver? = null
+
+    // Keeps the CPU up across the short re-arm delay: after the initial 10 s screen lock expires
+    // nothing else holds it, and the device may suspend before a 300 ms post runs.
+    private val rearmWakeLock: PowerManager.WakeLock? by lazy {
+        runCatching {
+            getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "juggluco:wearalarm-rearm")
+                .apply { setReferenceCounted(false) }
+        }.getOrNull()
     }
 
     private var title: String = "Glucose alarm"
@@ -83,10 +115,21 @@ class WearAlarmService : Service() {
             ACTION_STOP -> {
                 stopRinging(byTimeout = false); return START_NOT_STICKY
             }
+            ACTION_SURFACE -> {
+                // The surface went to the background while ringing — bring it back soon, then
+                // keep retrying slowly. Not a new alarm: nothing else changes.
+                if (_ringing.value != null) {
+                    handler.removeCallbacks(keepSurface)
+                    handler.postDelayed(keepSurface, 1_000)
+                }
+                return START_STICKY
+            }
         }
         title = intent?.getStringExtra(EXTRA_TITLE) ?: title
         text = intent?.getStringExtra(EXTRA_TEXT) ?: text
-        val timeoutSec = intent?.getIntExtra(EXTRA_TIMEOUT_SEC, 60) ?: 60
+        // 0 = ring until dismissed (the default). A restart after process death (START_STICKY,
+        // null intent) also rings until dismissed — an alarm that was ringing must not go quiet.
+        val timeoutSec = intent?.getIntExtra(EXTRA_TIMEOUT_SEC, 0) ?: 0
         // Publish the ringing state BEFORE any surface can observe it: MainActivity mirrors it to
         // the full-screen activity whenever the app is opened, and the activity closes on null.
         _ringing.value = RingingAlarm(title, text)
@@ -180,17 +223,62 @@ class WearAlarmService : Service() {
                 getSystemService(Vibrator::class.java)
             }
             vibrator = vib
-            runCatching {
-                val effect = VibrationEffect.createWaveform(VIBRATION_PATTERN, 0)
-                vib.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
-            }
+            playWaveform(vib)
         }
+        // Screen on/off handling (vibration re-arm + surface restore) applies to every ring,
+        // including a silent DND-suppressed one that still needs its surface.
+        registerScreenOffRearm()
 
         if (!dndSuppressed && prefs.alarmSound.value && player == null) {
             val uri: Uri? = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             player = uri?.let { createLoopingPlayer(it) }
         }
+    }
+
+    /** Start (or restart) the repeating alarm waveform. */
+    private fun playWaveform(vib: Vibrator) {
+        runCatching {
+            val effect = VibrationEffect.createWaveform(VIBRATION_PATTERN, 0)
+            vib.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+        }.onFailure { android.util.Log.w(TAG, "alarm vibration failed", it) }
+    }
+
+    private fun registerScreenOffRearm() {
+        if (screenOffReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        // Let the platform's screen-off cancellation land first, then restart the
+                        // pattern — under a short wakelock so the delayed post actually runs.
+                        runCatching { rearmWakeLock?.acquire(2_000L) }
+                        handler.removeCallbacks(rearmVibration)
+                        handler.postDelayed(rearmVibration, REARM_DELAY_MS)
+                    }
+                    // Wrist raised / screen woken while ringing: put the alarm surface up.
+                    Intent.ACTION_SCREEN_ON ->
+                        if (_ringing.value != null && !WearAlarmActivity.visible) launchAlarmScreen()
+                }
+            }
+        }
+        // Screen on/off are protected system broadcasts; a runtime receiver needs no export flag
+        // for them, but API 33+ requires the flag argument, and NOT_EXPORTED is the safe choice.
+        runCatching {
+            val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) }
+            ContextCompat.registerReceiver(
+                this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            screenOffReceiver = receiver
+        }.onFailure { android.util.Log.w(TAG, "screen-off re-arm unavailable", it) }
+    }
+
+    private fun unregisterScreenOffRearm() {
+        handler.removeCallbacks(rearmVibration)
+        handler.removeCallbacks(keepSurface)
+        runCatching { if (rearmWakeLock?.isHeld == true) rearmWakeLock?.release() }
+        screenOffReceiver?.let { r -> runCatching { unregisterReceiver(r) } }
+        screenOffReceiver = null
     }
 
     private fun launchAlarmScreen() {
@@ -241,6 +329,7 @@ class WearAlarmService : Service() {
             runCatching { p.release() }
         }
         player = null
+        unregisterScreenOffRearm()
         runCatching { vibrator?.cancel() }
         vibrator = null
         restoreInterruptionFilter()
@@ -256,6 +345,7 @@ class WearAlarmService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         _ringing.value = null
+        unregisterScreenOffRearm()
         runCatching { player?.release() }
         runCatching { vibrator?.cancel() }
         restoreInterruptionFilter()
@@ -319,6 +409,13 @@ class WearAlarmService : Service() {
         const val ACTION_DISMISS = "de.mogluco.wear.ALARM_DISMISS"
         const val ACTION_SNOOZE = "de.mogluco.wear.ALARM_SNOOZE"
         const val ACTION_STOP = "de.mogluco.wear.ALARM_STOP"
+        private const val ACTION_SURFACE = "de.mogluco.wear.ALARM_SURFACE"
+
+        /** Slow retry cadence for bringing a backgrounded alarm surface back while ringing. */
+        private const val SURFACE_RETRY_MS = 30_000L
+
+        /** Delay after a screen-off before re-issuing the waveform (after the platform cancels it). */
+        private const val REARM_DELAY_MS = 300L
 
         /** Direct-launch retry points after the alarm starts (screen-transition races). */
         private val RELAUNCH_DELAYS_MS = longArrayOf(2_000, 6_000)
@@ -340,6 +437,13 @@ class WearAlarmService : Service() {
                 .putExtra(EXTRA_TIMEOUT_SEC, timeoutSeconds)
             runCatching { ContextCompat.startForegroundService(context, intent) }
                 .onFailure { postFallback(context, title, text) }
+        }
+
+        /** The alarm surface was backgrounded while still ringing — ask the service to restore it. */
+        fun requestSurface(context: Context) {
+            runCatching {
+                context.startService(Intent(context, WearAlarmService::class.java).setAction(ACTION_SURFACE))
+            }
         }
 
         /** Silence without snoozing (condition resolved on its own). */

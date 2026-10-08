@@ -546,12 +546,13 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 onPlus = { prefs.setReminderRepeatMinutes((reminderRepeat + 5).coerceIn(REPEAT_MINUTES_RANGE)) },
                 onValueClick = { editRepeat = "reminder" },
             )
+            // 0 = ring until dismissed, the step below 15 s (same scheme as the watch alarm).
             StepperRow(
                 "Alarm duration",
-                "Rings for $timeout s, then auto-dimisses",
-                value = "${timeout}s",
-                onMinus = { prefs.setAlarmTimeoutSeconds((timeout - 15).coerceAtLeast(15)) },
-                onPlus = { prefs.setAlarmTimeoutSeconds((timeout + 15).coerceAtMost(600)) },
+                if (timeout == 0) "Rings until you dismiss or snooze it" else "Rings for $timeout s, then auto-dismisses",
+                value = if (timeout == 0) "Until dismissed" else "${timeout}s",
+                onMinus = { prefs.setAlarmTimeoutSeconds(if (timeout < 30) 0 else (timeout - 15).coerceIn(15, 600)) },
+                onPlus = { prefs.setAlarmTimeoutSeconds(if (timeout <= 0) 15 else (timeout + 15).coerceIn(15, 600)) },
                 onValueClick = { editRepeat = "timeout" },
             )
             StepperRow(
@@ -621,7 +622,7 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
         val title = when (which) {
             "alarm" -> "Out-of-range repeat (min)"
             "reminder" -> "Reminder repeat (min)"
-            "timeout" -> "Alarm duration (s)"
+            "timeout" -> "Alarm duration (s, 0 = until dismissed)"
             else -> "Signal-loss delay (min)"
         }
         NumberInputDialog(
@@ -637,7 +638,7 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 when (which) {
                     "alarm" -> prefs.setAlarmRepeatMinutes(v.coerceIn(REPEAT_MINUTES_RANGE))
                     "reminder" -> prefs.setReminderRepeatMinutes(v.coerceIn(REPEAT_MINUTES_RANGE))
-                    "timeout" -> prefs.setAlarmTimeoutSeconds(v.coerceIn(15, 600))
+                    "timeout" -> prefs.setAlarmTimeoutSeconds(if (v <= 0) 0 else v.coerceIn(15, 600))
                     else -> prefs.setSignalLossMinutes(v.coerceIn(SIGNAL_LOSS_MINUTES_RANGE))
                 }
             },

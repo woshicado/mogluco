@@ -209,7 +209,8 @@ class AppPreferences(context: Context) : DisplayPrefs {
     val watchAlarmRepeat: StateFlow<Int> = _watchAlarmRepeat.asStateFlow()
     private val _watchAlarmSnooze = intPref("watch_alarm_snooze", 30)
     val watchAlarmSnooze: StateFlow<Int> = _watchAlarmSnooze.asStateFlow()
-    private val _watchAlarmTimeout = intPref("watch_alarm_timeout", 60)
+    // Seconds the WATCH alarm rings; 0 = until dismissed (default), else 15..600.
+    private val _watchAlarmTimeout = intPref("watch_alarm_timeout", 0)
     val watchAlarmTimeout: StateFlow<Int> = _watchAlarmTimeout.asStateFlow()
 
     // Epoch millis of the most recent glucose reading (0 = none yet). Not a user-facing setting:

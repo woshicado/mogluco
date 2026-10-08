@@ -36,8 +36,8 @@ import tk.glucodata.WatchLink
  * semantics as the phone: a dismiss silences the excursion until the value returns to range; a
  * snooze re-alerts after the snooze if still out of range; a fresh excursion always alarms.
  *
- * Repeat/snooze/timeout use fixed sensible values (15 min / 30 min / 60 s); the phone keeps the
- * fully configurable alarm surface.
+ * Repeat/snooze/duration come from the phone's Watch settings (defaults 15 min / 30 min / ring
+ * until dismissed); the phone keeps the fully configurable alarm surface.
  */
 object WearAlarmController {
 
@@ -156,7 +156,9 @@ object WearAlarmController {
     }
 
     private fun fire(context: Context, kind: Kind, detail: String) {
-        val timeout = WearApp.from(context).preferences.wearTimeoutSeconds.value.toInt().coerceAtLeast(10)
+        // 0 = ring until dismissed; a configured duration is floored at 10 s.
+        val configured = WearApp.from(context).preferences.wearTimeoutSeconds.value.toInt()
+        val timeout = if (configured <= 0) 0 else configured.coerceAtLeast(10)
         WearAlarmService.start(context, title(kind), detail, timeout)
         lastFiredMillis = System.currentTimeMillis()
     }
