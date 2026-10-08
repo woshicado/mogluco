@@ -119,13 +119,15 @@ fun CalendarScreen(viewModel: HomeViewModel, onOpenDay: (Long) -> Unit, modifier
     var editing by remember { mutableStateOf<EventSheetTarget?>(null) }
 
     val context = androidx.compose.ui.platform.LocalContext.current
-    val selectedSensor = remember(selectedDay, state.sensor) { sensorOnDay(state.sensor, selectedDay) }
-    // Marker days come from the real active sensor (start-of-day millis), or none if no sensor.
-    val activationDays = remember(state.sensor) {
-        state.sensor?.let { setOf(startOfDay(it.activationMillis)) } ?: emptySet()
+    val selectedSensor = remember(selectedDay, state.sensor, state.sensorHistory) {
+        sensorOnDay(state.sensor, state.sensorHistory, selectedDay)
     }
-    val expiryDays = remember(state.sensor) {
-        state.sensor?.let { setOf(startOfDay(it.expiryMillis())) } ?: emptySet()
+    // Marker days for every stored sensor (past + current), start-of-day millis.
+    val activationDays = remember(state.sensor, state.sensorHistory) {
+        knownSensors(state.sensor, state.sensorHistory).map { startOfDay(it.activationMillis) }.toSet()
+    }
+    val expiryDays = remember(state.sensor, state.sensorHistory) {
+        knownSensors(state.sensor, state.sensorHistory).map { startOfDay(it.expiryMillis()) }.toSet()
     }
     // Per-day event categories → colored dots under the day number. Bucketed once per change of
     // the event list (reusing a single Calendar so a year of events stays cheap). Activity is
@@ -620,12 +622,25 @@ private val MARKER_ORDER = listOf(
 // --- date helpers ---
 
 /**
- * The sensor that was active on [dayStartMillis], from the real current sensor. We only track the
- * currently-active sensor, so this returns it for its activation day onward (no fabricated history
- * for days before it was activated). Null when there is no sensor or the day predates it.
+ * The current sensor merged into the stored sensor history (the current one wins for its id: it
+ * carries the live error state), oldest activation first.
  */
-internal fun sensorOnDay(sensor: SensorInfo?, dayStartMillis: Long): SensorInfo? =
-    sensor?.takeIf { dayStartMillis >= startOfDay(it.activationMillis) }
+internal fun knownSensors(current: SensorInfo?, history: List<SensorInfo>): List<SensorInfo> {
+    val others = history.filter { it.id != current?.id }
+    return (others + listOfNotNull(current)).sortedBy { it.activationMillis }
+}
+
+/**
+ * The sensor that was active on [dayStartMillis]. Looks through every stored sensor ([history],
+ * plus the [current] one) for those whose life — activation day through last expiry day — covers
+ * the day, and picks the most recently activated (a new sensor started before the old one expired
+ * takes over from its activation day). Falls back to the current sensor for days after its expiry
+ * while it is still worn, as before. Null when no known sensor covered the day.
+ */
+internal fun sensorOnDay(current: SensorInfo?, history: List<SensorInfo>, dayStartMillis: Long): SensorInfo? {
+    val covering = knownSensors(current, history).lastOrNull { sensorDayNumber(it, dayStartMillis) != null }
+    return covering ?: current?.takeIf { dayStartMillis >= startOfDay(it.activationMillis) }
+}
 
 /**
  * The 1-based sensor day badge for [dayStartMillis], or null when the day falls outside the

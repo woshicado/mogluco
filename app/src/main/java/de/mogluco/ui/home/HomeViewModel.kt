@@ -47,6 +47,8 @@ data class HomeUiState(
     val targetHigh: Double = 180.0,
     val history: List<GlucosePoint> = emptyList(),
     val sensor: SensorInfo? = null,
+    /** Every stored sensor (past + present), oldest first — the calendar's per-day sensor. */
+    val sensorHistory: List<SensorInfo> = emptyList(),
     val readingDisplay: ReadingDisplay = ReadingDisplay.BOTH,
     val showTargetBand: Boolean = true,
     val enabledLogKinds: Set<LogKind> = LogKind.entries.toSet(),
@@ -111,8 +113,9 @@ class HomeViewModel(
     }
 
     val uiState: StateFlow<HomeUiState> =
-        combine(core, display) { state, d ->
+        combine(core, display, repository.sensorHistory) { state, d, sensors ->
             state.copy(
+                sensorHistory = sensors,
                 readingDisplay = d.display,
                 showTargetBand = d.band,
                 enabledLogKinds = d.enabledLogKinds,

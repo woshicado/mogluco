@@ -114,6 +114,9 @@ class NativeGlucoseRepository(
         combine(prefs.targetLow, prefs.targetHigh) { lo, hi -> lo.toDouble()..hi.toDouble() }
     override val sensor: Flow<SensorInfo?> = _sensor.asStateFlow()
     override val currentSensor: SensorInfo? get() = _sensor.value
+
+    private val _sensorHistory = MutableStateFlow<List<SensorInfo>>(emptyList())
+    override val sensorHistory: Flow<List<SensorInfo>> = _sensorHistory.asStateFlow()
     override val currentReadingMillis: Long get() = _latest.value?.epochMillis ?: 0L
 
     /** Deactivation clears the active-sensor card + current reading so the UI returns to "no sensor".
@@ -368,6 +371,12 @@ class NativeGlucoseRepository(
                         mergeCapped(cur, smoothedPoints)
                     }
                 }
+                // Same trigger as the history (start, invalidate, new sensor): refresh the list of
+                // stored sensors so past calendar days can name the sensor that covered them.
+                _sensorHistory.value = Engine.storedSensors()
+                    .map { SensorInfo(id = it.serial, activationMillis = it.startMillis) }
+                    .distinctBy { it.id }
+                    .sortedBy { it.activationMillis }
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {

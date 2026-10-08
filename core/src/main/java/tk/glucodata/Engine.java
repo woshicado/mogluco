@@ -452,6 +452,61 @@ public final class Engine {
     /** Hard cap on points read per sensor (≈ 14 days of 5-minute values + slack). */
     private static final int MAX_HISTORY_POINTS = 8192;
 
+    /** A sensor the store knows about (past or present): its serial and activation time. */
+    public static final class StoredSensor {
+        public final String serial;
+        public final long startMillis;
+
+        StoredSensor(String serial, long startMillis) {
+            this.serial = serial;
+            this.startMillis = startMillis;
+        }
+    }
+
+    /**
+     * Every sensor in the store (past + present) with its activation time, in store order. The
+     * calendar uses this to name the sensor that was active on a past day — the repository's
+     * {@code sensor} flow only ever holds the CURRENT one. Activation comes from the sensor's own
+     * start time; when the engine doesn't know it, the first stored reading stands in. Sensors
+     * with neither are skipped. Synchronized for the same reason as {@link #glucoseHistory()}.
+     */
+    public static synchronized java.util.List<StoredSensor> storedSensors() {
+        java.util.ArrayList<StoredSensor> out = new java.util.ArrayList<>();
+        if (!started) {
+            return out;
+        }
+        try {
+            long[] sensors = Natives.allSensorPtrs();
+            if (sensors == null) {
+                return out;
+            }
+            for (long sensorptr : sensors) {
+                if (sensorptr == 0L) {
+                    continue;
+                }
+                String serial = Natives.namefromSensorptr(sensorptr);
+                if (serial == null || serial.isEmpty()) {
+                    continue;
+                }
+                long start = 0L;
+                long dataptr = Natives.getdataptr(serial);
+                if (dataptr != 0L) {
+                    start = Natives.getSensorStartmsec(dataptr);
+                }
+                if (start <= 0L) {
+                    long timeSec = Natives.streamfromSensorptr(sensorptr, 0) & 0xFFFFFFFFL;
+                    start = timeSec * 1000L;
+                }
+                if (start > 0L) {
+                    out.add(new StoredSensor(serial, start));
+                }
+            }
+        } catch (Throwable th) {
+            Log.e(LOG_ID, "storedSensors failed", th);
+        }
+        return out;
+    }
+
     /**
      * Reads the full stored 5-minute glucose history for all stored sensors (past + present), as a flat array of
      * {@code [timeMillis, mgdl, timeMillis, mgdl, …]} ordered by time. Empty if the engine isn't

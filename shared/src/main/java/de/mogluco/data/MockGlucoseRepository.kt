@@ -71,6 +71,9 @@ class MockGlucoseRepository(
     override val currentSensor: SensorInfo?
         get() = SampleData.activeSensor().copy(error = _sensorError.value)
 
+    override val sensorHistory: Flow<List<SensorInfo>> =
+        kotlinx.coroutines.flow.flowOf(SampleData.sensorHistory().sortedBy { it.activationMillis })
+
     override val readingDisplay: Flow<ReadingDisplay> = prefs.readingDisplay
 
     override fun deleteBefore(cutoffMillis: Long): Boolean {

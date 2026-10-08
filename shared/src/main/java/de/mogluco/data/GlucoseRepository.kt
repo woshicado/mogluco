@@ -44,6 +44,13 @@ interface GlucoseRepository {
     val sensor: Flow<SensorInfo?>
 
     /**
+     * Every sensor the store remembers (past + present), oldest activation first. Lets the
+     * calendar name the sensor that was active on a past day instead of only the current one.
+     */
+    val sensorHistory: Flow<List<SensorInfo>>
+        get() = kotlinx.coroutines.flow.flowOf(emptyList())
+
+    /**
      * A synchronous peek at the current [SensorInfo] (or null), for non-suspend callers such as
      * the alarm watchdog that must decide "is the sensor still warming up?" without collecting a
      * flow. Reflects the same value the [sensor] flow last emitted.

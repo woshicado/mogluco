@@ -195,7 +195,9 @@ private fun DayContent(
     // Half-open [midnight, next midnight): DST-safe (a fall-back day keeps its 25th hour) and −1
     // keeps a boundary reading out of both neighbouring days (chart/list windows are end-inclusive).
     val dayEnd = nextLocalMidnight(dayStartMillis) - 1
-    val sensor = remember(dayStartMillis, state.sensor) { sensorOnDay(state.sensor, dayStartMillis) }
+    val sensor = remember(dayStartMillis, state.sensor, state.sensorHistory) {
+        sensorOnDay(state.sensor, state.sensorHistory, dayStartMillis)
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         if (!maximized) {

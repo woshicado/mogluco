@@ -41,7 +41,7 @@ object SampleData {
      * day. The newest (current) sensor was activated 6 days ago; the one before it ran the
      * preceding 15 days. IDs differ so day-by-day lookup is visibly correct.
      */
-    private fun sensorHistory(now: Long = System.currentTimeMillis()): List<SensorInfo> = listOf(
+    fun sensorHistory(now: Long = System.currentTimeMillis()): List<SensorInfo> = listOf(
         SensorInfo(id = "3MH00CK4F2A", activationMillis = now - 6 * DAY_MS, lifetimeDays = 15),
         SensorInfo(id = "3MH00BX2E9C", activationMillis = now - 20 * DAY_MS, lifetimeDays = 15),
     )
