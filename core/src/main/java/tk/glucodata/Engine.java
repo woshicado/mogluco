@@ -131,6 +131,8 @@ public final class Engine {
             Natives.setlocale(lang);
             int ret = Natives.setfilesdir(filesDir, country, nativeDir);
             Log.i(LOG_ID, "setfilesdir(" + filesDir + ") ret=" + ret);
+            // Settings are loaded; before startthreads() starts the upload thread from them.
+            revertInterruptedPushOnce(app);
             Natives.startsensors();
             Natives.startmeals();
             Natives.startthreads();
@@ -245,11 +247,62 @@ public final class Engine {
 
     // --- LibreView (fetch account ID + upload) ---
 
-    /** Store the LibreView credentials/region used for the account-ID fetch and uploads. */
-    public static void setLibreviewCredentials(String email, String password, int country) {
-        Natives.setlibreemail(email == null ? "" : email);
-        Natives.setlibrepass(password == null ? "" : password);
+    // Native limits, in bytes of the UTF-8 the JNI side converts to (javasettings.cpp copies
+    // without a bounds check): setlibreemail writes the text plus a terminator into
+    // libreemail[256]; setlibrepass converts into char tmp[37] (text plus terminator) and stores
+    // into librepass[36]. Anything longer overruns the native stack and the settings fields that
+    // follow in the mmapped settings file.
+    private static final int LIBRE_EMAIL_MAX_BYTES = 255;
+    private static final int LIBRE_PASSWORD_MAX_BYTES = 36;
+
+    // The last setLibreviewCredentials() stored nothing: the native side still holds the
+    // credentials from before, so a fetch must not run with them.
+    private static volatile boolean credentialsRefused;
+
+    /**
+     * Store the LibreView credentials/region used for the account-ID fetch and uploads. Refuses
+     * e-mail/password that do not fit the native settings fields; nothing is stored then.
+     *
+     * @return null when stored, otherwise a short message saying what was refused (it is also
+     *     left in {@link #libreviewStatus()}, and {@link #fetchAccountId()} will not start).
+     */
+    @androidx.annotation.Nullable
+    public static String setLibreviewCredentials(String email, String password, int country) {
+        String mail = email == null ? "" : email;
+        String pass = password == null ? "" : password;
+        String refused = null;
+        if (!started) {
+            refused = "Engine not started.";
+        } else if (jniUtf8Length(mail) > LIBRE_EMAIL_MAX_BYTES) {
+            refused = "E-mail too long: at most " + LIBRE_EMAIL_MAX_BYTES + " bytes can be stored.";
+        } else if (jniUtf8Length(pass) > LIBRE_PASSWORD_MAX_BYTES) {
+            refused = "Password too long: at most " + LIBRE_PASSWORD_MAX_BYTES
+                + " bytes can be stored (letters like ä or € count as 2–3).";
+        }
+        credentialsRefused = refused != null;
+        if (refused != null) {
+            Libreview.librestatus = refused;
+            Log.e(LOG_ID, "setLibreviewCredentials refused: " + refused);
+            return refused;
+        }
+        Natives.setlibreemail(mail);
+        Natives.setlibrepass(pass);
         Natives.setLibreCountry(country);
+        return null;
+    }
+
+    /**
+     * Upper bound of the bytes JNI's (modified) UTF-8 conversion writes for {@code s}: U+0000 takes
+     * two bytes and a surrogate pair is counted as two 3-byte units (ART writes 4 for the pair), so
+     * this never undercounts whatever the runtime does.
+     */
+    private static int jniUtf8Length(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            n += (c >= 0x0001 && c <= 0x007F) ? 1 : (c <= 0x07FF ? 2 : 3);
+        }
+        return n;
     }
 
     public static String libreviewEmail() {
@@ -260,17 +313,66 @@ public final class Engine {
         return started ? Natives.getLibreCountry() : 0;
     }
 
+    // Marks of the account-ID fetch started last (this process only), for fetchedAccountId(). The
+    // stored account ID stays in place during a fetch — a failed one must not cost a working ID —
+    // so "the fetch delivered" has to be told apart from "the old ID is still there".
+    private static volatile boolean accountFetchStarted;
+    private static volatile boolean accountFetchDelivered;
+    private static volatile String accountIdAtFetch = "";
+    private static volatile String userTokenAtFetch = "";
+
+    /** What {@link Libreview#postgetauth} leaves as status right after storing a received ID. */
+    private static final String STATUS_ACCOUNT_RECEIVED = "Received AccountID";
+
     /**
      * Triggers an asynchronous LibreView account-ID fetch (the native thread contacts the server
-     * using the stored email/password). Poll {@link #libreAccountId()} / {@link #libreviewStatus()}
-     * for the result. Mirrors the legacy "Get Account ID → From Libreview".
+     * using the stored email/password). Poll {@link #fetchedAccountId()} for the result and
+     * {@link #libreviewStatus()} for progress/errors. Mirrors the legacy "Get Account ID → From
+     * Libreview".
+     *
+     * @return false when no fetch was started (engine not started, or the last
+     *     {@link #setLibreviewCredentials} was refused).
      */
-    public static void fetchAccountId() {
-        if (!started) {
-            return;
+    public static boolean fetchAccountId() {
+        if (!started || credentialsRefused) {
+            return false;
         }
+        accountIdAtFetch = safe(Natives.getlibreAccountID());
+        userTokenAtFetch = safe(Natives.getlibreUserToken(true));
+        accountFetchDelivered = false;
+        accountFetchStarted = true;
+        // Drop the outcome of an earlier attempt, so neither its error nor its "received" is read
+        // as this one's. The native thread writes the status again as it goes.
+        Libreview.librestatus = Libreview.nothing;
         Natives.setlibreAccountIDnumber(-1L); // legacy sentinel: derive number from the fetched string
         Natives.askServerforAccountID();
+        return true;
+    }
+
+    /**
+     * The account ID delivered by the fetch started with the last {@link #fetchAccountId()}; empty
+     * while that fetch is still running, after it failed, or when none was started in this
+     * process. Unlike {@link #libreAccountId()} it never returns the ID that was already stored
+     * before the fetch as if it had just arrived.
+     */
+    public static String fetchedAccountId() {
+        if (!started || !accountFetchStarted) {
+            return "";
+        }
+        String id = safe(Natives.getlibreAccountID());
+        if (!accountFetchDelivered) {
+            // A successful login stores a new user token and the account ID, then sets the
+            // status. The status alone is not enough: with uploading on, the thread goes on to
+            // post and overwrites it between two polls.
+            boolean delivered = STATUS_ACCOUNT_RECEIVED.equals(Libreview.librestatus)
+                || !id.equals(accountIdAtFetch)
+                || !safe(Natives.getlibreUserToken(true)).equals(userTokenAtFetch);
+            if (!delivered) {
+                return "";
+            }
+            accountFetchDelivered = true;
+        }
+        return id;
     }
 
     /** The fetched/stored LibreView account ID string (empty until fetched or set). */
@@ -306,19 +408,80 @@ public final class Engine {
         return Libreview.posttime;
     }
 
+    /**
+     * Whether the user has background uploading on. The native switch that {@link #pushOnce()}
+     * holds on for the length of its one-shot window does not count.
+     */
     public static boolean isUploadEnabled() {
-        return started && Natives.getuselibreview();
+        return started && !uploadRevertPending && Natives.getuselibreview();
     }
 
     // Bumped by every explicit upload-toggle (the persistent "Upload automatically" switch, pushNow).
     // pushOnce()'s delayed revert captures this and only fires if it hasn't changed since — so a
-    // persistent enable made inside the 30s one-shot window cancels the pending auto-off.
+    // persistent enable made inside the one-shot window cancels the pending auto-off.
     private static volatile int uploadIntentGen = 0;
+
+    // pushOnce() switched uploading on for a one-shot and still owes the switch-off. Mirrored in
+    // SharedPreferences (the native settings have no field for it) so that a process death inside
+    // the window cannot leave uploading on for good: Engine.start() settles the debt.
+    private static final String ENGINE_PREFS = "engine";
+    private static final String KEY_UPLOAD_REVERT_PENDING = "libreview_upload_revert_pending";
+    private static volatile boolean uploadRevertPending;
+
+    /** How long pushOnce() keeps uploading on when no upload completes, and how often it looks. */
+    private static final long PUSH_ONCE_MAX_MS = 120_000L;
+    private static final long PUSH_ONCE_POLL_MS = 2_000L;
+
+    // commit(), not apply(): the marker has to be on disk before the switch it guards is flipped,
+    // and its removal before a deliberate "upload on" could be undone by a stale marker.
+    private static void setUploadRevertPending(boolean pending) {
+        if (uploadRevertPending == pending) {
+            return;
+        }
+        uploadRevertPending = pending;
+        try {
+            android.content.SharedPreferences.Editor edit =
+                Applic.app.getSharedPreferences(ENGINE_PREFS, Context.MODE_PRIVATE).edit();
+            if (pending) {
+                edit.putBoolean(KEY_UPLOAD_REVERT_PENDING, true);
+            } else {
+                edit.remove(KEY_UPLOAD_REVERT_PENDING);
+            }
+            if (!edit.commit()) {
+                Log.e(LOG_ID, "setUploadRevertPending(" + pending + ") not written");
+            }
+        } catch (Throwable t) {
+            Log.e(LOG_ID, "setUploadRevertPending(" + pending + ") failed", t);
+        }
+    }
+
+    /**
+     * Switches uploading back off when the previous process died inside a {@link #pushOnce()}
+     * window. Runs from {@link #start} once the settings are loaded and before the native upload
+     * thread is started from them. Not on the watch: its native library has no LibreView code.
+     */
+    private static void revertInterruptedPushOnce(Context app) {
+        if (Applic.isWearable) {
+            return;
+        }
+        try {
+            android.content.SharedPreferences prefs =
+                app.getSharedPreferences(ENGINE_PREFS, Context.MODE_PRIVATE);
+            if (prefs.getBoolean(KEY_UPLOAD_REVERT_PENDING, false)) {
+                Natives.setuselibreview(false);
+                prefs.edit().remove(KEY_UPLOAD_REVERT_PENDING).commit();
+                Log.i(LOG_ID, "reverted the upload switch left on by an interrupted pushOnce");
+            }
+        } catch (Throwable t) {
+            Log.e(LOG_ID, "revertInterruptedPushOnce failed", t);
+        }
+    }
 
     /** Enable/disable uploading collected data to LibreView. */
     public static void setUploadEnabled(boolean on) {
         if (started) {
             uploadIntentGen++;
+            setUploadRevertPending(false); // the user decided; nothing left to revert
             Natives.setuselibreview(on);
             Log.i(LOG_ID, "setUploadEnabled " + on);
         }
@@ -339,6 +502,7 @@ public final class Engine {
     public static void pushNow() {
         if (started) {
             uploadIntentGen++;
+            setUploadRevertPending(false); // uploading stays on by request
             Natives.setuselibreview(true);
             Natives.wakelibreview(0);
             Log.i(LOG_ID, "pushNow");
@@ -347,27 +511,50 @@ public final class Engine {
 
     /**
      * One-shot push that does NOT leave background uploading on. The native upload thread only POSTs
-     * while uploading is enabled, so we briefly enable it and wake the thread; if the user hadn't
-     * turned background upload on, restore it to off after the post window. The persistent "Upload
-     * automatically" toggle is left untouched.
+     * while uploading is enabled, so we enable it and wake the thread; if the user hadn't turned
+     * background upload on, it is switched off again once an upload went through — or, when none
+     * does (nothing to send, no network, login failed), after {@link #PUSH_ONCE_MAX_MS}. A fixed
+     * short window would cut off a cold start: the thread first fetches its configuration and logs
+     * in, and exits without posting if the switch is off again by then. The owed switch-off is
+     * persisted, see {@link #revertInterruptedPushOnce}. The persistent "Upload automatically"
+     * toggle is left untouched.
      */
     public static void pushOnce() {
         if (!started) {
             return;
         }
         boolean wasOn = Natives.getuselibreview();
+        if (!wasOn) {
+            setUploadRevertPending(true); // on disk before the switch is flipped
+        }
         Natives.setuselibreview(true);
         Natives.wakelibreview(0);
         if (!wasOn) {
             final int gen = uploadIntentGen;
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                // Only revert if the user hasn't touched the upload toggle since (which bumps
-                // uploadIntentGen) — otherwise a persistent "Upload automatically" enabled inside
-                // this 30s window would be silently turned back off.
-                if (started && gen == uploadIntentGen) {
+            // Every successful POST assigns a new timestamp String (one POST carries everything
+            // pending), so a changed reference means this push is through.
+            final String postedBefore = Libreview.posttime;
+            final long deadline = android.os.SystemClock.elapsedRealtime() + PUSH_ONCE_MAX_MS;
+            final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    // Only revert if the user hasn't touched the upload toggle since (which bumps
+                    // uploadIntentGen and settles the marker) — otherwise a persistent "Upload
+                    // automatically" enabled inside this window would be silently turned back off.
+                    if (!started || gen != uploadIntentGen) {
+                        return;
+                    }
+                    boolean posted = Libreview.posttime != postedBefore;
+                    if (!posted && android.os.SystemClock.elapsedRealtime() < deadline) {
+                        handler.postDelayed(this, PUSH_ONCE_POLL_MS);
+                        return;
+                    }
                     Natives.setuselibreview(false);
+                    setUploadRevertPending(false);
+                    Log.i(LOG_ID, "pushOnce reverted (posted=" + posted + ")");
                 }
-            }, 30_000L);
+            }, PUSH_ONCE_POLL_MS);
         }
         Log.i(LOG_ID, "pushOnce (wasOn=" + wasOn + ")");
     }
@@ -449,17 +636,30 @@ public final class Engine {
 
     // --- Stored glucose history ---
 
-    /** Hard cap on points read per sensor (≈ 14 days of 5-minute values + slack). */
-    private static final int MAX_HISTORY_POINTS = 8192;
+    /**
+     * Guard on the points read per sensor and stream; never the limit for real data. The poll
+     * stream holds one value per MINUTE (a Libre 3 stores it by lifecount: 20,160 over 14 days,
+     * 21,600 over 15), the historic array one per five. The natives return the next position in
+     * 16 bits and the loops below only ever advance it, so a stream cannot yield more than this
+     * many points anyway — a lower cap silently drops the newest part of the poll stream.
+     */
+    private static final int MAX_HISTORY_POINTS = 1 << 16;
 
-    /** A sensor the store knows about (past or present): its serial and activation time. */
+    /**
+     * A sensor the store knows about (past or present): its serial, activation time, the engine's
+     * official end of its wear time and its last stored reading (each 0 when unknown).
+     */
     public static final class StoredSensor {
         public final String serial;
         public final long startMillis;
+        public final long officialEndMillis;
+        public final long lastReadingMillis;
 
-        StoredSensor(String serial, long startMillis) {
+        StoredSensor(String serial, long startMillis, long officialEndMillis, long lastReadingMillis) {
             this.serial = serial;
             this.startMillis = startMillis;
+            this.officialEndMillis = officialEndMillis;
+            this.lastReadingMillis = lastReadingMillis;
         }
     }
 
@@ -469,10 +669,13 @@ public final class Engine {
      * {@code sensor} flow only ever holds the CURRENT one. Activation comes from the sensor's own
      * start time; when the engine doesn't know it, the first stored reading stands in. Sensors
      * with neither are skipped. Synchronized for the same reason as {@link #glucoseHistory()}.
+     * Read straight from the stored sensor data — no {@link Natives#getdataptr}, which would
+     * allocate a stream object per call and reset the live sensor's error state. Empty on the
+     * watch: nothing there shows past sensors, and its native library lacks these natives.
      */
     public static synchronized java.util.List<StoredSensor> storedSensors() {
         java.util.ArrayList<StoredSensor> out = new java.util.ArrayList<>();
-        if (!started) {
+        if (!started || Applic.isWearable) {
             return out;
         }
         try {
@@ -488,17 +691,16 @@ public final class Engine {
                 if (serial == null || serial.isEmpty()) {
                     continue;
                 }
-                long start = 0L;
-                long dataptr = Natives.getdataptr(serial);
-                if (dataptr != 0L) {
-                    start = Natives.getSensorStartmsec(dataptr);
-                }
+                long[] life = Natives.lifefromSensorptr(sensorptr);
+                long start = life[0] * 1000L;
+                long officialEnd = life[1] * 1000L;
                 if (start <= 0L) {
                     long timeSec = Natives.streamfromSensorptr(sensorptr, 0) & 0xFFFFFFFFL;
                     start = timeSec * 1000L;
+                    officialEnd = 0L;
                 }
                 if (start > 0L) {
-                    out.add(new StoredSensor(serial, start));
+                    out.add(new StoredSensor(serial, start, officialEnd, life[2] * 1000L));
                 }
             }
         } catch (Throwable th) {
@@ -508,10 +710,12 @@ public final class Engine {
     }
 
     /**
-     * Reads the full stored 5-minute glucose history for all stored sensors (past + present), as a flat array of
+     * Reads the full stored glucose history (1-minute live values, 5-minute historic values where
+     * those are missing) for all stored sensors (past + present), as a flat array of
      * {@code [timeMillis, mgdl, timeMillis, mgdl, …]} ordered by time. Empty if the engine isn't
      * started or no sensor has data. This is what backfills the chart/calendar/export with the
      * sensor's pre-app-start readings (the engine stores them via saveLibre3History/saveLibre3MinuteL).
+     * Where two sensors delivered side by side only one of them is in it ({@link #overlapSpans}).
      */
     // synchronized: allSensorPtrs()/getSensorData() lazily maps sensors and grows the native hist[]
     // table, so it is not reentrant. Two callers reach here off the main thread —
@@ -528,9 +732,12 @@ public final class Engine {
         // value, ~16 min delayed) plus any recovered on-sensor buffer — so adding all of it would
         // duplicate nearly every reading (two points per minute). Collect the two streams
         // separately and only use a historic point where the poll stream has no reading nearby (a
-        // real gap), so historic fills gaps without duplicating the live stream.
-        java.util.ArrayList<long[]> poll = new java.util.ArrayList<>();
-        java.util.ArrayList<long[]> historic = new java.util.ArrayList<>();
+        // real gap), so historic fills gaps without duplicating the live stream. Both are kept per
+        // sensor (in store order) with the sensor's start: mergeHistory first leaves out a sensor
+        // for as long as its successor delivered beside it.
+        java.util.ArrayList<java.util.ArrayList<long[]>> polls = new java.util.ArrayList<>();
+        java.util.ArrayList<java.util.ArrayList<long[]>> historics = new java.util.ArrayList<>();
+        long[] starts = new long[0];
         try {
             // All stored sensors (past + present), so the chart/calendar show the full history,
             // not just sensors active in the last day. Read-only enumeration.
@@ -538,10 +745,17 @@ public final class Engine {
             if (sensors == null) {
                 return new long[0];
             }
+            starts = new long[sensors.length]; // 0 (not known) until a sensor is read in full
             for (long sensorptr : sensors) {
                 if (sensorptr == 0L) {
                     continue;
                 }
+                java.util.ArrayList<long[]> poll = new java.util.ArrayList<>();
+                java.util.ArrayList<long[]> historic = new java.util.ArrayList<>();
+                int index = polls.size();
+                polls.add(poll);
+                historics.add(historic);
+                long firstPoll = 0L;
                 int pos = 0;
                 for (int guard = 0; guard < MAX_HISTORY_POINTS; guard++) {
                     long packed = Natives.streamfromSensorptr(sensorptr, pos);
@@ -552,6 +766,9 @@ public final class Engine {
                         break; // end-of-stream sentinel
                     }
                     poll.add(new long[] {timeSec * 1000L, mgdl});
+                    if (firstPoll == 0L) {
+                        firstPoll = timeSec * 1000L; // only for sensorStartMillis' fallback
+                    }
                     if (nextPos <= pos) {
                         break; // no progress — avoid an infinite loop
                     }
@@ -572,9 +789,140 @@ public final class Engine {
                     }
                     hpos = nextPos;
                 }
+                starts[index] = sensorStartMillis(sensorptr, firstPoll);
             }
         } catch (Throwable t) {
             Log.e(LOG_ID, "glucoseHistory failed", t);
+        }
+        return mergeHistory(java.util.Arrays.copyOf(starts, polls.size()), polls, historics);
+    }
+
+    /**
+     * What orders the stored sensors for {@link #overlapSpans}, in epoch millis, 0 when not known:
+     * a sensor's activation time where the engine has one, else the time of its first live
+     * reading in the store ({@code firstPollMillis}, 0 = it has none). On the watch always the
+     * latter: its native library lacks {@link Natives#lifefromSensorptr}. Sensors worn one after
+     * another come out in the same order either way. Never throws — an order that is not known
+     * only leaves the sensor as it is.
+     */
+    private static long sensorStartMillis(long sensorptr, long firstPollMillis) {
+        if (!Applic.isWearable) {
+            try {
+                long[] life = Natives.lifefromSensorptr(sensorptr);
+                if (life != null && life.length > 0 && life[0] > 0L) {
+                    return life[0] * 1000L;
+                }
+            } catch (Throwable th) {
+                Log.e(LOG_ID, "sensorStartMillis failed", th);
+            }
+        }
+        return firstPollMillis;
+    }
+
+    /**
+     * How long past its last live reading a sensor still stands alone against the one before it
+     * (see {@link #overlapSpans}): what counts as a real hole in a series (the repository's
+     * GAP_THRESHOLD_MS), and well over the minute to the next reading of a sensor that delivers.
+     */
+    static final long OVERLAP_TAIL_MS = 15 * 60 * 1000L;
+
+    /**
+     * One sensor at a time in the history too, as on the live path
+     * ({@code NativeGlucoseRepository.followsSensor}): a replaced sensor that was not deactivated
+     * keeps transmitting next to its successor, and the store keeps both, minute by minute.
+     * Returns, per sensor, the stretches in which it contributes nothing to the history, as
+     * {@code [from, to, from, to, …]} (both inclusive; empty: all of it stays) — one for every
+     * LATER-ACTIVATED sensor: from that one's first live reading to its last, and
+     * {@link #OVERLAP_TAIL_MS} beyond. In there the later sensor stands alone, holes included.
+     *
+     * <p>Live readings, because that is when the later sensor was in use on this device: a history
+     * it brought along from before (a sensor taken over from another device) only fills holes of
+     * the sensor that delivered here then, as any historic point does. And up to its last one,
+     * because a sensor that has stopped for good — ended early, or taken off again — must not go
+     * on hiding one that is still worn and delivers: from a quarter of an hour after its last
+     * reading the earlier sensor counts again. (The live path goes back to it when the later one
+     * has ended; a later one that is merely silent for longer keeps the live path, while the
+     * history shows what the earlier one stored meanwhile — as it always did.)
+     *
+     * <p>"Later" is a known start time greater than this sensor's known one, as on the live path.
+     * A sensor whose start is not known (0) is never left out and hides no other, nor do two
+     * sensors with the same start: in doubt both stay in, as before. A sensor that ended before
+     * the next one delivered — the normal case — has no reading in that one's stretch, so nothing
+     * changes for it. This only shapes what {@link #glucoseHistory()} returns; the store is not
+     * touched. Public only for the unit tests (HistoryOverlapTest in :app).
+     *
+     * @param startMillis activation per sensor, 0 = not known
+     * @param firstLiveMillis first live reading per sensor, {@code Long.MAX_VALUE} = it has none
+     * @param lastLiveMillis last live reading per sensor (not read where it has none)
+     */
+    public static long[][] overlapSpans(long[] startMillis, long[] firstLiveMillis, long[] lastLiveMillis) {
+        long[][] spans = new long[startMillis.length][];
+        for (int i = 0; i < spans.length; i++) {
+            java.util.ArrayList<Long> hidden = new java.util.ArrayList<>();
+            if (startMillis[i] > 0L) {
+                for (int j = 0; j < startMillis.length; j++) {
+                    if (startMillis[j] > startMillis[i] && firstLiveMillis[j] != Long.MAX_VALUE) {
+                        hidden.add(firstLiveMillis[j]);
+                        hidden.add(lastLiveMillis[j] + OVERLAP_TAIL_MS);
+                    }
+                }
+            }
+            spans[i] = new long[hidden.size()];
+            for (int k = 0; k < spans[i].length; k++) {
+                spans[i][k] = hidden.get(k);
+            }
+        }
+        return spans;
+    }
+
+    /** Whether {@code timeMillis} lies in one of {@code spans} ({@code [from, to, …]}, inclusive). */
+    private static boolean within(long[] spans, long timeMillis) {
+        for (int k = 0; k + 1 < spans.length; k += 2) {
+            if (timeMillis >= spans[k] && timeMillis <= spans[k + 1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The flat, time-ordered history ({@link #glucoseHistory()}) from what was read per sensor:
+     * its start time (0 = not known), its poll stream (the live readings) and its historic
+     * stream, as {@code [timeMillis, mgdl]} points. Each sensor is first left out where a
+     * later-activated one delivered ({@link #overlapSpans}; a reading timed before its own
+     * sensor's start — a wrong clock — begins nothing), then the streams are merged as ever.
+     * Where no two sensors overlap the result is what it was before any of this. Pure; public
+     * only for the unit tests (HistoryOverlapTest in :app).
+     */
+    public static long[] mergeHistory(
+            long[] startMillis,
+            java.util.List<? extends java.util.List<long[]>> polls,
+            java.util.List<? extends java.util.List<long[]>> historics) {
+        long[] firsts = new long[startMillis.length];
+        long[] lasts = new long[startMillis.length];
+        for (int i = 0; i < firsts.length; i++) {
+            firsts[i] = Long.MAX_VALUE;
+            for (long[] p : polls.get(i)) {
+                if (p[0] >= startMillis[i]) {
+                    firsts[i] = Math.min(firsts[i], p[0]);
+                    lasts[i] = Math.max(lasts[i], p[0]);
+                }
+            }
+        }
+        long[][] spans = overlapSpans(startMillis, firsts, lasts);
+        java.util.ArrayList<long[]> poll = new java.util.ArrayList<>();
+        java.util.ArrayList<long[]> historic = new java.util.ArrayList<>();
+        for (int i = 0; i < spans.length; i++) {
+            for (long[] p : polls.get(i)) {
+                if (!within(spans[i], p[0])) {
+                    poll.add(p);
+                }
+            }
+            for (long[] h : historics.get(i)) {
+                if (!within(spans[i], h[0])) {
+                    historic.add(h);
+                }
+            }
         }
         // Keep all poll points; add a historic point only when the nearest poll reading is more than
         // HIST_GAP_FILL_MS away (i.e. it sits in a genuine gap the live stream never covered).

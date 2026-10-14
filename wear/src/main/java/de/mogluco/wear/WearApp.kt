@@ -6,6 +6,7 @@ import de.mogluco.data.GlucoseRepository
 import de.mogluco.data.MockGlucoseRepository
 import de.mogluco.data.NativeGlucoseRepository
 import de.mogluco.wear.alarm.WearAlarmController
+import de.mogluco.wear.service.WearGlucoseService
 import tk.glucodata.WatchLink
 
 /**
@@ -64,6 +65,12 @@ class WearApp : Application() {
             // Needs the booted engine (repository construction above started it).
             WatchLink.init(this)
         }
+        // Whatever recreated the process (a complication or tile request after it was killed),
+        // bring the keep-alive service back with it: without it nothing holds the process, so data
+        // and alarms stop again until the app is opened. From the background the system only
+        // allows this start under an exemption (battery optimisation off, which the app asks
+        // for); a refusal is caught in start() and leaves things as they were.
+        WearGlucoseService.start(this)
     }
 
     companion object {

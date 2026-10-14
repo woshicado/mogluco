@@ -4,7 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -64,13 +64,25 @@ fun WearHomeScreen(
     // resume, so returning from the grant screen clears it right away) because a
     // silently-degraded glucose alarm is a safety issue the user must not miss.
     val alarmsLimited = remember(now) { !canUseFullScreenAlarm(context) }
+    // The warning is the last line of the centred readout, in the wide middle of a round screen
+    // (the top edge, where it used to sit, is the narrowest part and belongs to the time). One
+    // line of text is no touch target, so while it shows the whole readout opens the grant screen.
+    val readout = if (alarmsLimited) {
+        Modifier.clickable(onClickLabel = "Allow full-screen alarms", role = Role.Button) {
+            requestFullScreenAlarmAccess(context)
+        }
+    } else {
+        Modifier
+    }
 
     ScreenScaffold {
         Box(Modifier.fillMaxSize()) {
             val r = reading
             if (r == null) {
                 Column(
-                    modifier = Modifier.align(Alignment.Center),
+                    // Side padding: the second line is wider than a round screen and has to wrap
+                    // inside the circle, centred, rather than run from edge to edge.
+                    modifier = Modifier.align(Alignment.Center).then(readout).padding(horizontal = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -79,7 +91,9 @@ fun WearHomeScreen(
                         "Values arrive from your phone or sensor",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
+                    if (alarmsLimited) AlarmAccessWarning()
                 }
             } else {
                 val glucose = WearMoglucoTheme.glucose
@@ -88,7 +102,7 @@ fun WearHomeScreen(
                     r.state(targetRange.start, targetRange.endInclusive),
                 )
                 Column(
-                    modifier = Modifier.align(Alignment.Center),
+                    modifier = Modifier.align(Alignment.Center).then(readout),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Row(
@@ -108,27 +122,21 @@ fun WearHomeScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    sensor?.let { s ->
-                        Text(
-                            "Day ${s.dayOfLife(now)} of ${s.lifetimeDays}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    // The warning takes the sensor-day line's place rather than adding a fourth, so
+                    // the readout keeps the height it has between the time and the buttons; the
+                    // sensor day is still in Settings.
+                    if (alarmsLimited) {
+                        AlarmAccessWarning()
+                    } else {
+                        sensor?.let { s ->
+                            Text(
+                                "Day ${s.dayOfLife(now)} of ${s.lifetimeDays}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
-            }
-            if (alarmsLimited) {
-                Text(
-                    "⚠ Tap to enable full-screen alarms",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 6.dp)
-                        .clickable { requestFullScreenAlarmAccess(context) },
-                )
             }
             Row(
                 modifier = Modifier
@@ -145,6 +153,17 @@ fun WearHomeScreen(
             }
         }
     }
+}
+
+/** Names the fix, as the tap on the readout around it performs it (see [WearHomeScreen]). */
+@Composable
+private fun AlarmAccessWarning() {
+    Text(
+        "⚠ Allow full-screen alarms",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+        textAlign = TextAlign.Center,
+    )
 }
 
 internal fun ageText(ageMillis: Long): String {

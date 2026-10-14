@@ -22,7 +22,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import de.mogluco.ui.theme.MoglucoTheme
+import kotlinx.coroutines.launch
 
 /**
  * Full-screen alarm surface launched by [AlarmService]'s full-screen intent when the device is
@@ -54,19 +56,27 @@ class AlarmActivity : ComponentActivity() {
 
         readAlarmExtras(intent)
 
+        // Follow the ringing state: close when the ring ends without a tap here (timeout, back in
+        // range, dismissed on the watch). Left open, the lock screen would still show last night's
+        // alarm in the morning — and its Dismiss would then hit whatever excursion is current.
+        lifecycleScope.launch {
+            AlarmService.ringing.collect { alarm ->
+                if (alarm == null) {
+                    finish()
+                } else {
+                    title = alarm.title
+                    text = alarm.text
+                }
+            }
+        }
+
         setContent {
             MoglucoTheme {
                 AlarmScreen(
                     title = title,
                     text = text,
                     onDismiss = { AlarmService.dismiss(this); finish() },
-                    onSnooze = {
-                        startService(
-                            Intent(this, AlarmService::class.java)
-                                .setAction(AlarmService.ACTION_SNOOZE),
-                        )
-                        finish()
-                    },
+                    onSnooze = { AlarmService.snooze(this); finish() },
                 )
             }
         }

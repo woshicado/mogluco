@@ -25,10 +25,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import de.mogluco.data.AppPreferences
 import de.mogluco.data.EventRepository
-import de.mogluco.data.GlucosePoint
 import de.mogluco.data.GlucoseRepository
-import de.mogluco.data.LoggedEvent
 import de.mogluco.data.SensorInfo
+import de.mogluco.ui.export.ExportData
+import de.mogluco.ui.export.loadExportData
 
 /**
  * Backs the Settings tab and its subscreens. Display-level settings live in
@@ -83,9 +83,9 @@ class SettingsViewModel(
     val sensor: StateFlow<SensorInfo?> =
         glucoseRepository.sensor.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val history: StateFlow<List<GlucosePoint>> =
-        glucoseRepository.history.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    val events: StateFlow<List<LoggedEvent>> =
-        eventRepository.recent.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /**
+     * The readings and events for the export modal, read from the repositories when the file is
+     * written; null while the stored history is still loading (see [loadExportData]).
+     */
+    suspend fun exportData(): ExportData? = loadExportData(glucoseRepository, eventRepository)
 }

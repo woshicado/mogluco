@@ -1292,7 +1292,7 @@ template <class LT> void    JCurve::epochlines(NVGcontext* avg,uint32_t first,ui
             nvgStroke(avg);
             }
     }
-extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors() ;
 extern void setusedsensors() ;
 extern void setusedsensors(uint32_t nu) ;
 void setmaxsensors(size_t sensornr) {
@@ -1790,7 +1790,8 @@ displaytime disp=getdisplaytime(nu,starttime2,endtime, transx);
         }
 
     if(nu<endtime&&(dwidth-smallfontlineheight)>nupos) {
-        showbluevalue(avg,nu, nupos,usedsensors);
+        std::vector<int> used=getusedsensors(); // a copy taken under the list's lock (glucose.cpp)
+        showbluevalue(avg,nu, nupos,used);
         LOGAR("end display curve value");
         }
     else  {

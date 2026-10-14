@@ -31,8 +31,12 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
@@ -40,16 +44,24 @@ import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -86,6 +98,9 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 
 private const val ROUTE_MAIN = "main"
 
+/** Largest font scale the bottom navigation's labels follow (one line in a quarter of the width). */
+private const val NAV_LABEL_MAX_FONT_SCALE = 1.5f
+
 class MainActivity : ComponentActivity() {
 
     private val app get() = application as MoglucoApp
@@ -108,7 +123,9 @@ class MainActivity : ComponentActivity() {
                 OnboardingViewModel(
                     app.sensorActivator,
                     app.glucoseRepository.latest,
-                    sensorActive = { tk.glucodata.Sensors.activeSensors().isNotEmpty() },
+                    activeSensors = {
+                        runCatching { tk.glucodata.Sensors.activeSensors().toSet() }.getOrDefault(emptySet())
+                    },
                     onActivated = {
                         // The phone just activated this sensor over NFC, so the phone owns its
                         // BLE — reclaim the role from a watch that owned the previous sensor
@@ -160,32 +177,42 @@ class MainActivity : ComponentActivity() {
                 val lowAlarm by app.preferences.lowAlarmEnabled.collectAsStateWithLifecycle()
                 val highAlarm by app.preferences.highAlarmEnabled.collectAsStateWithLifecycle()
                 val lossAlarm by app.preferences.signalLossAlarm.collectAsStateWithLifecycle()
-                val keepAlive = persist || lowAlarm || highAlarm || lossAlarm
-                val notifPermission = androidx.activity.compose.rememberLauncherForActivityResult(
-                    androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-                ) {
-                    // Start regardless of the answer: the FGS runs fine without POST_NOTIFICATIONS
-                    // (the notification just stays hidden), and alarms must not depend on it.
-                    de.mogluco.notification.GlucoseNotificationService.start(context)
-                }
+                val lossNotification by app.preferences.signalLossNotification.collectAsStateWithLifecycle()
+                val keepAlive = persist || lowAlarm || highAlarm || lossAlarm || lossNotification
                 androidx.compose.runtime.LaunchedEffect(keepAlive) {
+                    // Notifications or not: the service runs fine without them (its notification
+                    // just stays hidden), and alarms must not depend on them.
                     if (keepAlive) {
-                        val needsPerm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                            androidx.core.content.ContextCompat.checkSelfPermission(
-                                context, android.Manifest.permission.POST_NOTIFICATIONS,
-                            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
-                        // Ask at most once per process: this effect re-runs on every activity
-                        // recreation, and re-launching the system dialog each time (or after a
-                        // permanent denial, when it auto-denies without showing) is just spam.
-                        if (needsPerm && !askedNotifPermission) {
-                            askedNotifPermission = true
-                            notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            de.mogluco.notification.GlucoseNotificationService.start(context)
-                        }
+                        de.mogluco.notification.GlucoseNotificationService.start(context)
                     } else {
                         de.mogluco.notification.GlucoseNotificationService.stop(context)
                     }
+                }
+
+                // Notifications and background use are asked for once, on the first open, and only
+                // where one of them is missing then: never again by itself once answered, whatever
+                // the answer. (Settings → Notifications offers both for as long as they are
+                // missing.) The note is made with the answer, not with the showing: a question that
+                // never got one — the app closed over it — is still owed.
+                val accessAsked by app.preferences.backgroundAccessAsked.collectAsStateWithLifecycle()
+                var accessMissing by androidx.compose.runtime.saveable.rememberSaveable {
+                    androidx.compose.runtime.mutableStateOf(false)
+                }
+                // Not while an alarm rings: the dialog would cover the banner that may be its only
+                // Dismiss / Snooze (notifications blocked — a likely reason for the question).
+                val alarmRinging = de.mogluco.notification.AlarmService.ringing
+                    .collectAsStateWithLifecycle().value != null
+                androidx.compose.runtime.LaunchedEffect(accessAsked) {
+                    if (accessAsked) return@LaunchedEffect
+                    accessMissing = !de.mogluco.ui.permissions.notificationsAllowed(context) ||
+                        !de.mogluco.ui.permissions.backgroundUnrestricted(context)
+                    // Nothing to ask for on the first open: nothing will be asked later either.
+                    if (!accessMissing) app.preferences.setBackgroundAccessAsked(true)
+                }
+                if (!accessAsked && accessMissing && !alarmRinging) {
+                    de.mogluco.ui.permissions.BackgroundAccessDialog(
+                        onDone = { app.preferences.setBackgroundAccessAsked(true) },
+                    )
                 }
 
                 val navController = rememberNavController()
@@ -204,7 +231,13 @@ class MainActivity : ComponentActivity() {
                     else -> Tab.entries[pagerState.currentPage]
                 }
 
+                // A ringing alarm gets its Dismiss / Snooze on every screen of the app. With
+                // notifications blocked (POST_NOTIFICATIONS denied) the alarm still rings, but its
+                // notification and lock-screen alarm screen — the other stop controls — never show.
+                val ringing by de.mogluco.notification.AlarmService.ringing.collectAsStateWithLifecycle()
+
                 Scaffold(
+                    topBar = { ringing?.let { RingingAlarmBanner(it) } },
                     bottomBar = {
                         NavigationBar {
                             Tab.entries.forEachIndexed { index, tab ->
@@ -217,7 +250,13 @@ class MainActivity : ComponentActivity() {
                                         scope.launch { pagerState.animateScrollToPage(index) }
                                     },
                                     icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                    label = { Text(tab.label) },
+                                    // One line at any font size: the item is a quarter of the
+                                    // width, and at 2× "Calendar" broke into "Calend / ar".
+                                    label = {
+                                        de.mogluco.ui.util.FontScaleAtMost(NAV_LABEL_MAX_FONT_SCALE) {
+                                            Text(tab.label, maxLines = 1, softWrap = false)
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -249,7 +288,7 @@ class MainActivity : ComponentActivity() {
                                 when (Tab.entries[page]) {
                                     Tab.HOME -> HomeScreen(
                                         viewModel = homeViewModel,
-                                        onAddSensor = { navController.navigate("onboarding") },
+                                        onAddSensor = { openOnboarding(navController) },
                                         onOpenSensorInfo = { navController.navigate("sensorInfo") },
                                     )
                                     Tab.CALENDAR -> CalendarScreen(
@@ -271,7 +310,7 @@ class MainActivity : ComponentActivity() {
                         composable("sensorInfo") {
                             SensorSettingsScreen(
                                 viewModel = settingsViewModel,
-                                onActivate = { navController.navigate("onboarding") },
+                                onActivate = { openOnboarding(navController) },
                                 onBack = { navController.popBackStack() },
                             )
                         }
@@ -319,6 +358,56 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** The in-app stop control for a ringing alarm, shown above every screen while it rings. */
+    @androidx.compose.runtime.Composable
+    private fun RingingAlarmBanner(alarm: de.mogluco.notification.AlarmService.RingingAlarm) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        Surface(color = MaterialTheme.colorScheme.errorContainer) {
+            Row(
+                // As the Scaffold's top bar this sits under the status bar, so take its inset here.
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        alarm.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    if (alarm.text.isNotEmpty()) {
+                        Text(
+                            alarm.text,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+                // A test ring has nothing to snooze.
+                if (!alarm.test) {
+                    TextButton(onClick = { de.mogluco.notification.AlarmService.snooze(context) }) { Text("Snooze") }
+                }
+                Button(onClick = { de.mogluco.notification.AlarmService.dismiss(context) }) {
+                    Text(if (alarm.test) "Stop" else "Dismiss")
+                }
+            }
+        }
+    }
+
+    /**
+     * Open the add-sensor flow from its first step. Its view model outlives the screen
+     * (activity-scoped), so a finished earlier run would otherwise still sit on its "Sensor
+     * activated" / "All set" step — only a Done button, NFC reader mode off — and no new sensor
+     * could be scanned until the activity was destroyed.
+     */
+    private fun openOnboarding(navController: NavHostController) {
+        onboardingViewModel.restart()
+        navController.navigate("onboarding")
+    }
+
     @androidx.compose.runtime.Composable
     private fun OnboardingRoute(navController: NavHostController) {
         val state by onboardingViewModel.state.collectAsStateWithLifecycle()
@@ -342,8 +431,16 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private companion object {
-        /** Process-wide "asked already" flag for POST_NOTIFICATIONS — see the keep-alive effect. */
-        private var askedNotifPermission = false
+    companion object {
+        /**
+         * The intent for notification taps: resumes the running activity. A bare component intent
+         * does not match the launcher task's root intent, so on a `standard` activity every tap
+         * stacked another MainActivity on the task (Back then walked through the old copies).
+         * Together with launchMode singleTop the existing one is brought back instead.
+         */
+        fun resumeIntent(context: android.content.Context): android.content.Intent =
+            android.content.Intent(context, MainActivity::class.java).addFlags(
+                android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            )
     }
 }

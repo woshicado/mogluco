@@ -18,6 +18,10 @@
 /*                                                                                   */
 package de.mogluco.ui.home
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -26,7 +30,9 @@ import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -44,6 +50,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -55,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import de.mogluco.data.EventCategory
 import de.mogluco.data.glucoseState
 import de.mogluco.data.unit
@@ -71,6 +79,7 @@ import de.mogluco.ui.theme.colorFor
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -92,6 +101,15 @@ fun eventColor(category: EventCategory): Color = when (category) {
     EventCategory.BLOOD -> Color(0xFFE11D48)      // crimson (blood reference)
     EventCategory.OTHER -> Color(0xFF8B5CF6)      // violet
 }
+
+/**
+ * Black or white for content on an [eventColor] fill (chart pills, speed-dial circles), picked
+ * from the fill's luminance — fixed white was ~1.9:1 on the amber carbs colour. 0.179 is the
+ * luminance at which black and white contrast equally (WCAG contrast math), so this is always
+ * the higher-contrast of the two.
+ */
+fun onEventColor(category: EventCategory): Color =
+    if (eventColor(category).luminance() > 0.179f) Color.Black else Color.White
 
 /**
  * Fully custom, interactive glucose chart. Drawn on a [Canvas] (rather than Vico) so it can
@@ -244,9 +262,9 @@ fun GlucoseChart(
                         (((latest.epochMillis - it.epochMillis).coerceAtLeast(1)) / 60_000.0)
                     TrendArrow.fromRate(rate).name.lowercase().replace('_', ' ')
                 }
-                "Glucose chart from ${axisTimeFmt.format(Date(windowStart))} to " +
-                    "${axisTimeFmt.format(Date(windowEnd))}. Latest ${unit.format(latest.calibratedMgdl)} " +
-                    "${unit.label} at ${axisTimeFmt.format(Date(latest.epochMillis))}" +
+                "Glucose chart from ${axisTimeFmt.format(windowStart)} to " +
+                    "${axisTimeFmt.format(windowEnd)}. Latest ${unit.format(latest.calibratedMgdl)} " +
+                    "${unit.label} at ${axisTimeFmt.format(latest.epochMillis)}" +
                     (trend?.let { ", trend $it" } ?: "")
             }
         }
@@ -328,7 +346,7 @@ fun GlucoseChart(
             while (tv <= windowEnd) {
                 val x = xOf(tv)
                 drawLine(gridColor, Offset(x, plotT), Offset(x, plotB), strokeWidth = 1f)
-                drawAxisLabel(textMeasurer, fmt.format(Date(tv)), Offset(x, plotB + 3f), labelStyle, center = true)
+                drawAxisLabel(textMeasurer, fmt.format(tv), Offset(x, plotB + 3f), labelStyle, center = true)
                 tv += tStep
             }
 
@@ -430,12 +448,7 @@ private fun DrawScope.drawEventMarkers(
 
     data class Pill(val e: LoggedEvent, val x: Float, val left: Float, val w: Float, val h: Float, val text: TextLayoutResult, val row: Int)
     val pills = events.map { e ->
-        // Black or white per pill from the fill's luminance — fixed white was ~1.9:1 on the
-        // amber carbs pill. 0.179 is the luminance at which black and white text contrast
-        // equally (WCAG contrast math), so this always picks the higher-contrast of the two.
-        val fill = eventColor(e.category)
-        val onFill = if (fill.luminance() > 0.179f) Color.Black else Color.White
-        val text = tm.measure(eventChipLabel(e), TextStyle(color = onFill, fontSize = 9.sp, fontWeight = FontWeight.SemiBold))
+        val text = tm.measure(eventChipLabel(e), TextStyle(color = onEventColor(e.category), fontSize = 9.sp, fontWeight = FontWeight.SemiBold))
         val w = text.size.width + padX * 2
         val h = text.size.height + padY * 2
         val x = xOf(e)
@@ -505,7 +518,7 @@ private fun DrawScope.drawTooltip(
     valueColor: Color,
     rawColor: Color,
 ) {
-    val time = tooltipDateFmt.format(Date(point.epochMillis))
+    val time = tooltipDateFmt.format(point.epochMillis)
     val rows = mutableListOf<TextLayoutResult>()
     rows += tm.measure(time, TextStyle(color = textColor, fontSize = 10.sp))
     val bigVal = if (showCal) point.calibratedMgdl else point.rawMgdl
@@ -587,14 +600,68 @@ private fun niceTimeStep(duration: Long): Long {
     }
 }
 
-// Formatters are reused rather than re-allocated: the whole Canvas redraws every inspector-drag
-// frame, so building a SimpleDateFormat per draw was needless churn. Single-threaded (main) draw,
-// so sharing them is safe.
-private val tooltipDateFmt = SimpleDateFormat("EEE HH:mm", Locale.getDefault())
-private val axisTimeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-private val axisDayFmt = SimpleDateFormat("EEE HH", Locale.getDefault())
+/**
+ * A reused date formatter that follows the device's CURRENT time zone and locale. A file-level
+ * SimpleDateFormat captures both when the class loads, and this process lives for days: after
+ * travelling, the list, axis and tooltip kept showing the old zone's times while the day windows
+ * (computed per call) had already moved to the new one. The formatter is rebuilt only when the
+ * zone or locale actually changed, so the per-row / per-frame cost stays one cheap comparison.
+ * Not thread-safe — main-thread (composition and draw) use only.
+ */
+internal class LocalTimeFormat(private val pattern: String) {
+    private var zoneId: String? = null
+    private var locale: Locale? = null
+    private var format: SimpleDateFormat? = null
+    private val date = Date()
 
-private fun timeFormatter(duration: Long): SimpleDateFormat =
+    fun format(epochMillis: Long): String {
+        // Read so whatever composes or draws this text is redone on a zone change — see
+        // [FollowTimeZoneChanges].
+        timeZoneChanges.intValue
+        val zone = TimeZone.getDefault()
+        val loc = Locale.getDefault()
+        val fmt = format?.takeIf { zone.id == zoneId && loc == locale }
+            ?: SimpleDateFormat(pattern, loc).also {
+                it.timeZone = zone
+                format = it; zoneId = zone.id; locale = loc
+            }
+        date.time = epochMillis
+        return fmt.format(date)
+    }
+}
+
+/** Bumped on every time-zone change; [LocalTimeFormat.format] reads it. */
+private val timeZoneChanges = mutableIntStateOf(0)
+
+/**
+ * Redoes every time already on screen when the device's time zone changes. [LocalTimeFormat]
+ * looks the zone up only when asked to format, and nothing asks again for a row whose inputs did
+ * not change: after a zone change the rows already composed kept the old zone's times, next to
+ * new rows in the new zone.
+ */
+@Composable
+internal fun FollowTimeZoneChanges() {
+    val context = LocalContext.current
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                timeZoneChanges.intValue++
+            }
+        }
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(Intent.ACTION_TIMEZONE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+}
+
+// Formatters are reused rather than re-allocated: the whole Canvas redraws every inspector-drag
+// frame, so building a SimpleDateFormat per draw was needless churn.
+private val tooltipDateFmt = LocalTimeFormat("EEE HH:mm")
+private val axisTimeFmt = LocalTimeFormat("HH:mm")
+private val axisDayFmt = LocalTimeFormat("EEE HH")
+
+private fun timeFormatter(duration: Long): LocalTimeFormat =
     if (duration <= 24 * 60 * 60 * 1000L) axisTimeFmt else axisDayFmt
 
 private fun formatAxis(displayValue: Double, unit: GlucoseUnit): String = when (unit) {

@@ -126,9 +126,15 @@ public final class Sensors {
      * {@code SensorBluetooth.reconnectall()}; the redesign dropped that alarm, so a link that
      * stalled without a clean disconnect (failed service discovery, a handshake that never
      * completes, a null connectGatt) was never retried. No-op unless this device owns the link
-     * ({@code usebluetooth}); rebuilds the BLE manager if it was torn down. Each sensor's
-     * {@link SuperGattCallback#reconnect} only acts when its own data is stale, so a kick on a
-     * healthy link does nothing.
+     * ({@code usebluetooth}); rebuilds the BLE manager if it was torn down.
+     *
+     * <p>Not harmless on a healthy link: {@link SuperGattCallback#reconnect} only holds back when
+     * the connection attempt is under a minute old or a <i>failed</i> reading arrived within the
+     * reading-age window. It does not look at the last good reading (upstream's caller, the
+     * loss-of-signal alarm, implied that), so a sensor that is connected but silent is disconnected
+     * and has to reconnect and re-authenticate. The caller must therefore only kick when readings
+     * are really overdue: stale, and the sensor past its warm-up (during which a connected Libre 3
+     * legitimately sends nothing) — see {@code WearGlucoseService}.
      */
     public static void watchdogKick() {
         if (!Natives.getusebluetooth()) {
@@ -162,20 +168,33 @@ public final class Sensors {
         if (serial == null) {
             return 0L;
         }
-        long dataptr = Natives.getdataptr(serial);
-        return dataptr != 0L ? Natives.getSensorStartmsec(dataptr) : 0L;
+        return Natives.startmsecfromSerial(serial);
+    }
+
+    /**
+     * Official end of the wear time (epoch millis) of the given serial, or 0 if the engine does not
+     * know it — the nominal lifetime (14 or 15 days) follows from it and the activation time.
+     */
+    public static long sensorOfficialEndMillis(String serial) {
+        if (serial == null) {
+            return 0L;
+        }
+        return Natives.officialendmsecfromSerial(serial);
     }
 
     /**
      * Current sensor state for the given serial: -1 invalid, 0 ok, 6 sensor error (defective),
      * 7 replace sensor, 8 not ready (warm-up), 9 ended.
+     *
+     * <p>A pure read, like {@link #sensorStartMillis}: both are asked on every reading, so they must
+     * not go through {@link Natives#getdataptr}, which allocates a stream object (to be freed) and
+     * resets the sensor's error flag — the flag state 6/7 is derived from.
      */
     public static int sensorState(String serial) {
         if (serial == null) {
             return -1;
         }
-        long dataptr = Natives.getdataptr(serial);
-        return dataptr != 0L ? Natives.getSensorState(dataptr) : -1;
+        return Natives.statefromSerial(serial);
     }
 
     /**
@@ -186,9 +205,15 @@ public final class Sensors {
         if (serial == null) {
             return;
         }
+        // A stream object of our own, next to the one the sensor's GATT callback holds (it only
+        // points at the sensor's data, owning nothing of it) — so free it again.
         long dataptr = Natives.getdataptr(serial);
         if (dataptr != 0L) {
-            Natives.finishSensor(dataptr);
+            try {
+                Natives.finishSensor(dataptr);
+            } finally {
+                Natives.freedataptr(dataptr);
+            }
         }
         SensorBluetooth.sensorEnded(serial);
         Log.i(LOG_ID, "deactivated " + serial);
@@ -213,6 +238,8 @@ public final class Sensors {
     /**
      * As {@link #pullHistoryFromSensor(int)} but [announce]=false keeps it silent (no result toast) —
      * used by the automatic gap-fill on sensor reconnect, where the user shouldn't be bothered.
+     * Only the announced pull is limited to sensors that are connected right now; the silent one is
+     * queued on every registered sensor (and counts those), to run with its next reading.
      */
     public static int pullHistoryFromSensor(int minutes, boolean announce) {
         return SensorBluetooth.pullHistoryFromSensor(minutes, announce);

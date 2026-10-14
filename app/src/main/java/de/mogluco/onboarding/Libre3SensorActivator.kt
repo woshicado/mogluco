@@ -60,12 +60,13 @@ class Libre3SensorActivator(
             Libre3Activation.Outcome.NOT_LIBRE3 ->
                 ActivationResult.Failed("That doesn't look like a Libre 3 sensor.")
             Libre3Activation.Outcome.ERROR ->
-                // Often a rescan/take-over of an already-active sensor: the NFC step errors but the
-                // engine registers it and BLE streams a moment later — so let the UI confirm via a
-                // fresh reading before failing.
+                // The engine could not hand the sensor to Bluetooth (its BLE side is down, e.g. a
+                // watch still owns the previous sensor). It may still have registered the sensor,
+                // so let the UI check for that before failing.
                 ActivationResult.Failed(
                     "Activation failed. Check your account ID and try scanning again.",
                     transient = true,
+                    registeredSerial = result.serial,
                 )
         }
     }

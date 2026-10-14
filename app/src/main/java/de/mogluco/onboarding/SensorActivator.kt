@@ -34,8 +34,14 @@ sealed interface ActivationResult {
      * read, or a take-over/rescan where the NFC step errors but the engine still registers the sensor
      * and BLE streaming starts a moment later) — for those the UI waits briefly for a reading before
      * calling it a failure. Definitive failures (terminated / ended / not a Libre 3) set it false.
+     * [registeredSerial] is set when the NFC exchange itself worked and the engine registered that
+     * sensor — only the hand-off to Bluetooth did not (this phone's BLE side is down).
      */
-    data class Failed(val reason: String, val transient: Boolean = false) : ActivationResult
+    data class Failed(
+        val reason: String,
+        val transient: Boolean = false,
+        val registeredSerial: String? = null,
+    ) : ActivationResult
 }
 
 /**

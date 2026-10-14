@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import de.mogluco.data.GlucoseUnit
+import de.mogluco.data.SensorInfo
 import de.mogluco.wear.MainActivity
 import de.mogluco.wear.WearApp
 import de.mogluco.wear.complication.ArrowComplicationService
@@ -62,8 +63,14 @@ class WearGlucoseService : LifecycleService() {
     /** What the surfaces last rendered ("124 →" / "--"); gates redundant update pushes. */
     private var lastPushedKey: String? = null
 
+    /** Time of the reading the complications and the tile were last asked to render (0 = none). */
+    private var lastPushedReadingMillis = 0L
+
     /** Elapsed realtime of the last reconnect kick; seeded at start so the first waits one interval. */
     private var lastWatchdogKickElapsed = android.os.SystemClock.elapsedRealtime()
+
+    /** Reconnect kicks since the last fresh reading; spaces the next one out ([watchdogSpacing]). */
+    private var watchdogKicks = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -77,7 +84,11 @@ class WearGlucoseService : LifecycleService() {
                 repo.latest, repo.history, prefs.unit, prefs.targetLow, prefs.targetHigh,
             ) { reading, history, unit, low, high ->
                 GlucoseSnapshot.Snapshot(
-                    reading = reading,
+                    // Until the first live reading of this process (a restart with the link
+                    // down can take the whole staleness window), the stored tail stands in, as
+                    // in GlucoseSnapshot.read. It arrives after the first, empty emission, and
+                    // changes what the surfaces render — so it is pushed like a new value.
+                    reading = reading ?: GlucoseSnapshot.tailReading(history),
                     history = history,
                     unit = unit,
                     targetLow = low.toDouble(),
@@ -93,12 +104,31 @@ class WearGlucoseService : LifecycleService() {
                 // push once more; a new snapshot cancels the wait (collectLatest). The dedup gate
                 // also protects the WearOS complication/tile update quota — burning it on
                 // no-change pushes could throttle the update for a REAL new reading.
+                //
+                // An unchanged value still has to be handed over again, though: complications and
+                // the tile hold it only until the reading they were built from turns stale, so a
+                // flat "5.6 →" pushed once would read "--" 5.5 min later with readings arriving
+                // every minute. So they are also refreshed once the reading is [REPUSH_MILLIS]
+                // newer than the one last pushed — every other reading, which leaves the pushed
+                // value 3.5 min of validity to spare for readings that go missing.
+                //
+                // delay() counts uptime, so the boundary push slips for as long as the watch is
+                // suspended. Complications and the tile don't depend on it: they carry the expiry
+                // with the value (GlucoseSnapshot.Snapshot.usableUntilMillis) and the system
+                // drops it on the wall clock. Only the chip waits for this loop.
                 while (true) {
                     GlucoseSnapshot.update(snapshot)
                     val displayKey = chipText(snapshot)
-                    if (displayKey != lastPushedKey) {
+                    val changed = displayKey != lastPushedKey
+                    if (changed) {
                         lastPushedKey = displayKey
                         updateOngoing(snapshot)
+                    }
+                    val readingMillis = snapshot.reading?.epochMillis ?: 0L
+                    if (changed || (snapshot.isUsable() &&
+                            readingMillis - lastPushedReadingMillis >= REPUSH_MILLIS)
+                    ) {
+                        lastPushedReadingMillis = readingMillis
                         requestComplicationUpdates(this@WearGlucoseService)
                         TileService.getUpdater(this@WearGlucoseService)
                             .requestUpdate(GlucoseTileService::class.java)
@@ -107,26 +137,36 @@ class WearGlucoseService : LifecycleService() {
                         GlucoseSnapshot.STALE_MILLIS - it.ageMillis(System.currentTimeMillis())
                     } ?: 0L
                     if (untilStale > 0) {
+                        watchdogKicks = 0 // readings flow: a later stall starts at the base spacing
                         delay(untilStale + 1_000) // +1 s so the re-check lands past the boundary
                         continue
                     }
                     // Stale (or nothing yet). When this watch owns the sensor's BLE link, nudge a
                     // reconnect now and every few minutes until data flows again (a new reading
                     // cancels this via collectLatest). Mirror-only watches stop here as before.
-                    if (!ownsSensorLink()) break
+                    if (!ownsSensorLink()) {
+                        watchdogKicks = 0
+                        break
+                    }
                     // Spaced globally (re-emissions of the combine restart this loop) and never
-                    // sooner than one interval after the service started, so boot/warm-up and
-                    // history reloads don't trigger back-to-back reconnects. Expired sensors are
-                    // left alone (nothing to reconnect to; avoids an endless rescan).
+                    // sooner than one interval after the service started, so boot and history
+                    // reloads don't trigger back-to-back reconnects.
                     val now = android.os.SystemClock.elapsedRealtime()
-                    val wait = lastWatchdogKickElapsed + WATCHDOG_INTERVAL_MS - now
+                    val wait = lastWatchdogKickElapsed + watchdogSpacing() - now
                     if (wait > 0) {
                         delay(wait)
                         continue
                     }
                     lastWatchdogKickElapsed = now
-                    if (repo.currentSensor?.isExpired() != true) runCatching { Sensors.watchdogKick() }
-                    delay(WATCHDOG_INTERVAL_MS)
+                    if (readingsDue(repo.currentSensor)) {
+                        runCatching { Sensors.watchdogKick() }
+                        watchdogKicks++
+                    } else {
+                        // Nothing overdue (warm-up, expired): no kick, and re-check at the base
+                        // spacing so the first real kick isn't late once readings do become due.
+                        watchdogKicks = 0
+                    }
+                    delay(watchdogSpacing())
                 }
             }
         }
@@ -138,18 +178,40 @@ class WearGlucoseService : LifecycleService() {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Not only at process death: a service that was refused foreground state runs as a plain
+        // background one, which the system stops once the app is idle — in a process that lives
+        // on. The collector above ends with the service and nothing refreshes the snapshot from
+        // here on, so it must not stay behind as the answer for complications and the tile.
+        GlucoseSnapshot.clear()
+    }
+
     private fun startAsForeground(snapshot: GlucoseSnapshot.Snapshot?) {
         // The foreground service always needs a notification, but the user can slim it to a minimal
         // one (no value chip on the watch face) via the persistent-notification toggle.
         val showChip = de.mogluco.wear.WearApp.from(this).preferences.persistentNotification.value
         val builder = baseNotification(snapshot, full = showChip)
         if (showChip) attachOngoingActivity(builder, snapshot)
-        ServiceCompat.startForeground(
-            this,
-            NOTIF_ID,
-            builder.build(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-        )
+        // A START_STICKY restart after process death is a start from the background, which the
+        // system may refuse (ForegroundServiceStartNotAllowedException) unless the app is exempt
+        // from battery optimisation. Uncaught that crashes the process — and with it the data, the
+        // alarms and a ring WearAlarmService is restoring in it — again on every restart attempt.
+        // Keep running as long as the system lets us. The notification is not posted as a plain
+        // one instead: nothing would take it down with the process, and its chip would go on
+        // showing an old value. With no chip up, every new value tries again (updateOngoing), and
+        // so does every start (app opened, boot).
+        runCatching {
+            ServiceCompat.startForeground(
+                this,
+                NOTIF_ID,
+                builder.build(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+        }.onFailure {
+            // One line, no stack trace: this repeats with every value for as long as it is refused.
+            android.util.Log.w(TAG, "startForeground refused; running without it: $it")
+        }
     }
 
     /** Refresh the notification + ongoing chip with the latest value. */
@@ -168,6 +230,32 @@ class WearGlucoseService : LifecycleService() {
     private fun ownsSensorLink(): Boolean =
         runCatching { Natives.getusebluetooth() }.getOrDefault(false)
 
+    /**
+     * Whether stale readings mean a stuck link, i.e. the sensor should be streaming right now.
+     * The kick is not harmless on a healthy link: it disconnects and re-authenticates a sensor
+     * that is connected but has sent nothing for a while ([Sensors.watchdogKick]). So:
+     * - not during warm-up, when a Libre 3 is connected but legitimately silent for 60 minutes —
+     *   plus one staleness window, so the first reading has had its time to arrive;
+     * - not once expired (nothing to reconnect to; avoids an endless rescan).
+     * An unknown sensor is kicked as before.
+     */
+    private fun readingsDue(sensor: SensorInfo?): Boolean {
+        if (sensor == null) return true
+        val now = System.currentTimeMillis()
+        return !sensor.isExpired(now) && !sensor.isWarmingUp(now - GlucoseSnapshot.STALE_MILLIS)
+    }
+
+    /**
+     * Spacing to the next reconnect kick. The first two kicks of a stall keep the base interval,
+     * so a stuck link is retried as promptly as before; after that it doubles up to
+     * [WATCHDOG_MAX_INTERVAL_MS], so a sensor that is gone for good (fell off, failed before its
+     * nominal expiry, out of range for hours) is not reconnected and rescanned every 5 minutes
+     * forever. A fresh reading resets it.
+     */
+    private fun watchdogSpacing(): Long =
+        (WATCHDOG_INTERVAL_MS shl (watchdogKicks - 1).coerceIn(0, 8))
+            .coerceAtMost(WATCHDOG_MAX_INTERVAL_MS)
+
     private fun chipText(snapshot: GlucoseSnapshot.Snapshot?): String {
         if (snapshot == null) return "--"
         val now = System.currentTimeMillis()
@@ -181,7 +269,7 @@ class WearGlucoseService : LifecycleService() {
     private fun baseNotification(snapshot: GlucoseSnapshot.Snapshot?, full: Boolean): NotificationCompat.Builder {
         val tap = PendingIntent.getActivity(
             this,
-            0,
+            MainActivity.REQUEST_HOME,
             Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 // The ongoing chip returns to the app's Home menu, resetting the stack if needed.
@@ -211,7 +299,7 @@ class WearGlucoseService : LifecycleService() {
     ) {
         val tap = PendingIntent.getActivity(
             this,
-            0,
+            MainActivity.REQUEST_HOME,
             Intent(this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 // The ongoing chip returns to the app's Home menu, resetting the stack if needed.
@@ -229,10 +317,21 @@ class WearGlucoseService : LifecycleService() {
     }
 
     companion object {
+        private const val TAG = "WearGlucoseService"
         private const val CHANNEL_ID = "wear_glucose_ongoing"
+
+        /**
+         * An unchanged value is pushed to complications and tile again once its reading is this
+         * much newer than the pushed one: just under two reading intervals (a second of jitter
+         * in the timestamps must not make it three), well inside [GlucoseSnapshot.STALE_MILLIS].
+         */
+        private const val REPUSH_MILLIS = 110_000L
 
         /** Reconnect-kick spacing while this watch owns the sensor but readings are stale. */
         private const val WATCHDOG_INTERVAL_MS = 5 * 60_000L
+
+        /** Cap of the kick spacing once it backs off (see [watchdogSpacing]). */
+        private const val WATCHDOG_MAX_INTERVAL_MS = 10 * 60_000L
         private const val NOTIF_ID = 0x91
 
         fun start(context: Context) {

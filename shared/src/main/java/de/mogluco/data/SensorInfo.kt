@@ -120,16 +120,22 @@ data class SensorError(
  *
  * @param id sensor serial / identifier
  * @param activationMillis when the sensor was activated (warm-up start)
- * @param lifetimeDays nominal sensor life (Libre 3 Plus = 15 days)
+ * @param lifetimeDays nominal sensor life: the engine's figure (14 or 15 days) where it knows one,
+ *   for the current sensor as for past ones; otherwise the default (Libre 3 Plus = 15 days)
  * @param error a currently-reported fault, or null when healthy
+ * @param endMillis for a past sensor, when its life actually ended as far as the store knows (it
+ *   failed or was replaced before its nominal expiry); null — always for the current sensor —
+ *   means the nominal [lifetimeDays]
  */
 data class SensorInfo(
     val id: String,
     val activationMillis: Long,
     val lifetimeDays: Int = 15,
     val error: SensorError? = null,
+    val endMillis: Long? = null,
 ) {
-    fun expiryMillis(): Long = activationMillis + TimeUnit.DAYS.toMillis(lifetimeDays.toLong())
+    fun expiryMillis(): Long =
+        endMillis ?: (activationMillis + TimeUnit.DAYS.toMillis(lifetimeDays.toLong()))
 
     /** End of the warm-up period (Libre 3 warms up for 60 minutes after activation). */
     fun warmupEndMillis(): Long = activationMillis + WARMUP_MS

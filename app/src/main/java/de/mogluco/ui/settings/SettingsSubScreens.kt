@@ -40,6 +40,8 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
@@ -186,17 +188,29 @@ fun SensorSettingsScreen(viewModel: SettingsViewModel, onActivate: () -> Unit, o
                             libreStatus = "Needs the live engine (sample-data mode is on)."
                             return@Button
                         }
+                        // Refused (too long for the engine's fixed-size fields): nothing was
+                        // stored, and fetching would log in with the previous credentials.
+                        val refused = tk.glucodata.Engine.setLibreviewCredentials(libreEmail.trim(), librePassword, 0)
+                        if (refused != null) {
+                            libreStatus = refused
+                            return@Button
+                        }
+                        if (!tk.glucodata.Engine.fetchAccountId()) {
+                            libreStatus = "Could not start the LibreView request."
+                            return@Button
+                        }
                         fetching = true
                         libreStatus = "Contacting LibreView…"
-                        tk.glucodata.Engine.setLibreviewCredentials(libreEmail.trim(), librePassword, 0)
-                        tk.glucodata.Engine.fetchAccountId()
                         scope.launch {
                             // The native thread fetches asynchronously and a cold request (config +
                             // auth round-trips to Abbott's servers) can be slow, so poll patiently
                             // (~2 min). It keeps running even if you leave the screen — the on-open
                             // effect above also picks up a late result.
                             repeat(60) {
-                                val id = tk.glucodata.Engine.libreAccountId()
+                                // Only what THIS request delivered: an ID already stored from an
+                                // earlier fetch must not be reported as freshly received (another
+                                // account, a wrong password).
+                                val id = tk.glucodata.Engine.fetchedAccountId()
                                 if (id.isNotBlank()) {
                                     // The fetched ID is stored natively as a string; the number
                                     // actually sent to the sensor is the engine's derived value
@@ -213,8 +227,10 @@ fun SensorSettingsScreen(viewModel: SettingsViewModel, onActivate: () -> Unit, o
                                 kotlinx.coroutines.delay(2000)
                             }
                             fetching = false
-                            if (account.isBlank()) {
-                                libreStatus = "Still no account ID — check your e-mail/password, or reopen this screen in a moment."
+                            libreStatus = if (account.isBlank()) {
+                                "Still no account ID — check your e-mail/password, or reopen this screen in a moment."
+                            } else {
+                                "No new account ID received — check your e-mail/password. The current ID is unchanged."
                             }
                         }
                     },
@@ -423,9 +439,12 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
     // the alarm screen silently never appears over the lock screen. Re-read on every resume so
     // returning from the system settings page refreshes the row.
     var canFullScreenAlarm by remember { mutableStateOf(canUseFullScreenIntent(context)) }
+    var notificationsEnabled by remember { mutableStateOf(canPostNotifications(context)) }
+    val requestNotifications = de.mogluco.ui.permissions.rememberNotificationRequest()
     var dndAccessGranted by remember { mutableStateOf(hasDndAccess(context)) }
     androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
         canFullScreenAlarm = canUseFullScreenIntent(context)
+        notificationsEnabled = canPostNotifications(context)
         val granted = hasDndAccess(context)
         if (granted && !dndAccessGranted) {
             // Back from the DND-access settings with the grant: re-stamp the bypass flag onto
@@ -440,8 +459,12 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
     val soundPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
+        // Back / Cancel must leave the chosen sound alone (it used to store "Silent").
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
         val uri = result.data?.getParcelableExtra<android.net.Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
-        val title = uri?.let { RingtoneManager.getRingtone(context, it)?.getTitle(context) } ?: "Silent"
+        // No URI = nothing custom: alarms then play the system default alarm sound, so say that.
+        // (The picker no longer offers "None" — silence is the Sound switch above.)
+        val title = uri?.let { RingtoneManager.getRingtone(context, it)?.getTitle(context) } ?: "Default"
         prefs.setAlarmSound(uri?.toString() ?: "", title)
     }
 
@@ -509,6 +532,14 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                     },
                 )
             }
+            if (!notificationsEnabled) {
+                NavRow(
+                    icon = null,
+                    title = "Notifications are blocked",
+                    subtitle = "Alarms still ring, but only inside Mogluco can you dismiss or snooze them — tap to allow notifications",
+                    onClick = requestNotifications,
+                )
+            }
             if (!canFullScreenAlarm) {
                 NavRow(
                     icon = null,
@@ -551,7 +582,7 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 "Alarm duration",
                 if (timeout == 0) "Rings until you dismiss or snooze it" else "Rings for $timeout s, then auto-dismisses",
                 value = if (timeout == 0) "Until dismissed" else "${timeout}s",
-                onMinus = { prefs.setAlarmTimeoutSeconds(if (timeout < 30) 0 else (timeout - 15).coerceIn(15, 600)) },
+                onMinus = { prefs.setAlarmTimeoutSeconds(alarmDurationStepDown(timeout)) },
                 onPlus = { prefs.setAlarmTimeoutSeconds(if (timeout <= 0) 15 else (timeout + 15).coerceIn(15, 600)) },
                 onValueClick = { editRepeat = "timeout" },
             )
@@ -570,12 +601,17 @@ fun TargetAlarmsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
             NavRow(
                 icon = null,
                 title = "Alarm sound",
-                value = soundTitle,
+                // No stored URI plays the system default — also for a "Silent" stored by an
+                // earlier version's picker, which was never silent.
+                value = if (soundUri.isEmpty()) "Default" else soundTitle,
                 onClick = {
                     val intent = android.content.Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
                         putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
                         putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Alarm sound")
                         putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                        // No "None" entry: the Sound switch is how to silence the alarm, and a
+                        // silent pick was never honoured (the default tone played instead).
+                        putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
                         if (soundUri.isNotEmpty()) {
                             putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, android.net.Uri.parse(soundUri))
                         }
@@ -662,6 +698,22 @@ private fun canUseFullScreenIntent(context: android.content.Context): Boolean =
         (context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
             .canUseFullScreenIntent()
 
+/**
+ * Whether Mogluco may post notifications at all (POST_NOTIFICATIONS on Android 13+, or the app's
+ * notifications switched off in system settings). Alarms ring regardless, but their notification
+ * and lock-screen alarm screen — which carry Dismiss / Snooze — need it.
+ */
+private fun canPostNotifications(context: android.content.Context): Boolean =
+    androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+
+/**
+ * The alarm-duration stepper's minus (phone and watch alarm): 15 s steps down to 15 s, and only
+ * from there to 0 = "until dismissed". A typed value below 30 s (say 20) steps to 15 first rather
+ * than jumping straight to "until dismissed".
+ */
+internal fun alarmDurationStepDown(seconds: Int): Int =
+    if (seconds <= 15) 0 else (seconds - 15).coerceIn(15, 600)
+
 /** Whether the user granted Mogluco Do-Not-Disturb (notification-policy) access. */
 private fun hasDndAccess(context: android.content.Context): Boolean =
     (context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
@@ -695,19 +747,50 @@ fun NotificationSettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit)
     // so values computed during composition went stale and the enable loop felt broken (grant
     // the permission, return, row still says disabled).
     var aodEnabled by remember { mutableStateOf(AodOverlayService.isEnabled(context)) }
-    val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
-    var ignoringBattery by remember {
-        mutableStateOf(powerManager.isIgnoringBatteryOptimizations(context.packageName))
-    }
+    var unrestricted by remember { mutableStateOf(de.mogluco.ui.permissions.backgroundUnrestricted(context)) }
+    var restricted by remember { mutableStateOf(de.mogluco.ui.permissions.backgroundRestricted(context)) }
+    var notificationsOn by remember { mutableStateOf(de.mogluco.ui.permissions.notificationsAllowed(context)) }
     androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
         aodEnabled = AodOverlayService.isEnabled(context)
-        ignoringBattery = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+        unrestricted = de.mogluco.ui.permissions.backgroundUnrestricted(context)
+        restricted = de.mogluco.ui.permissions.backgroundRestricted(context)
+        notificationsOn = de.mogluco.ui.permissions.notificationsAllowed(context)
         onPauseOrDispose { }
+    }
+    val requestNotifications = de.mogluco.ui.permissions.rememberNotificationRequest()
+    // Opening this screen with notifications off is asking about them: offered each time it is
+    // opened (not again on a rotation, nor on coming back from the system settings).
+    var offerNotifications by rememberSaveable { mutableStateOf(!notificationsOn) }
+    if (offerNotifications) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { offerNotifications = false },
+            title = { Text("Notifications are off") },
+            text = {
+                Text(
+                    "Without them Mogluco cannot show your current glucose in the status bar, nor put " +
+                        "Dismiss / Snooze for alarms on the lock screen. Alarms still ring.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { offerNotifications = false; requestNotifications() }) { Text("Allow") }
+            },
+            dismissButton = { TextButton(onClick = { offerNotifications = false }) { Text("Not now") } },
+        )
     }
     var showAodDialog by remember { mutableStateOf(false) }
     var showAodPosDialog by remember { mutableStateOf(false) }
 
     SettingsSubScreen("Notifications", onBack) {
+        if (!notificationsOn) {
+            SettingsSection("Permission") {
+                NavRow(
+                    icon = null,
+                    title = "Notifications are blocked",
+                    subtitle = "Nothing below can show until you allow them — tap to allow notifications",
+                    onClick = requestNotifications,
+                )
+            }
+        }
         SettingsSection("Persistent notification") {
             SwitchRow(
                 null,
@@ -795,8 +878,8 @@ fun NotificationSettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit)
             }
         }
         SettingsSection("Background") {
-            // ignoringBattery is refreshed on resume by the LifecycleResumeEffect above.
-            if (ignoringBattery) {
+            // Refreshed on resume by the LifecycleResumeEffect above.
+            if (unrestricted) {
                 InfoRow("Battery optimization", "Unrestricted ✓")
                 Text(
                     "Mogluco can run in the background, so readings keep arriving.",
@@ -808,17 +891,13 @@ fun NotificationSettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit)
                 NavRow(
                     icon = null,
                     title = "Battery optimization",
-                    subtitle = "Allow Mogluco to run unrestricted so readings keep arriving",
-                    onClick = {
-                        runCatching {
-                            context.startActivity(
-                                android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                                    .setData(android.net.Uri.parse("package:${context.packageName}")),
-                            )
-                        }.onFailure {
-                            context.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                        }
+                    subtitle = if (restricted) {
+                        "Battery usage is “Restricted”: readings and alarms stop soon after you leave the app. " +
+                            "Tap, then ${de.mogluco.ui.permissions.restrictedHint()}"
+                    } else {
+                        "Allow Mogluco to run unrestricted so readings keep arriving"
                     },
+                    onClick = { de.mogluco.ui.permissions.openBackgroundSettings(context) },
                 )
             }
         }
@@ -885,6 +964,14 @@ private fun InfoRow(
     }
 }
 
+/** The longest value a [StepperRow] still shows between its buttons ("240 min", "600 s"). */
+private const val STEPPER_INLINE_VALUE_CHARS = 8
+
+/**
+ * A value with − / + buttons. A number sits between the buttons; a value that is a phrase ("Until
+ * dismissed") goes on its own line under the title instead: between the buttons it left the title
+ * about 80dp of a 360dp screen — less at a larger font — and "Alarm duration" broke mid-word.
+ */
 @Composable
 internal fun StepperRow(
     title: String,
@@ -894,9 +981,21 @@ internal fun StepperRow(
     onPlus: () -> Unit,
     onValueClick: (() -> Unit)? = null,
 ) {
+    val inline = value.length <= STEPPER_INLINE_VALUE_CHARS
+    val valueText = @Composable { modifier: Modifier ->
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier
+                .let { if (onValueClick != null) it.clickable(onClick = onValueClick) else it }
+                .then(modifier),
+        )
+    }
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        // End padding: a wrapped title or subtitle must not run into the − button.
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (!inline) valueText(Modifier.padding(vertical = 4.dp))
             if (subtitle != null) {
                 Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -904,13 +1003,11 @@ internal fun StepperRow(
         FilledIconButton(onClick = onMinus, modifier = Modifier.size(40.dp)) {
             Icon(Icons.Filled.Remove, contentDescription = "decrease")
         }
-        Text(
-            value,
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier
-                .let { if (onValueClick != null) it.clickable(onClick = onValueClick) else it }
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-        )
+        if (inline) {
+            valueText(Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+        } else {
+            Spacer(Modifier.size(12.dp))
+        }
         FilledIconButton(onClick = onPlus, modifier = Modifier.size(40.dp)) {
             Icon(Icons.Filled.Add, contentDescription = "increase")
         }

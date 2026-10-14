@@ -26,6 +26,9 @@ import de.mogluco.onboarding.SimulatedSensorActivator
 /** One emission of the phone's display prefs to mirror to the watch (see [MoglucoApp]). */
 private data class UiPrefsPush(val hasWatch: Boolean, val mmol: Boolean, val low: Float, val high: Float)
 
+/** One emission of the watch's alarm timings to push to the watch (see [MoglucoApp]). */
+private data class WearAlarmPush(val hasWatch: Boolean, val repeatMin: Int, val snoozeMin: Int, val timeoutSec: Int)
+
 /**
  * Application entry point and the app's tiny manual dependency container.
  */
@@ -105,6 +108,26 @@ class MoglucoApp : Application() {
                     if (push.hasWatch) {
                         delay(400) // debounce rapid slider changes; collectLatest cancels a pending push
                         tk.glucodata.WatchLink.pushUiPrefs(push.mmol, push.low, push.high)
+                    }
+                }
+            }
+            // Same for the watch's alarm timings (repeat / snooze / duration): on connect and on
+            // every change, not only when a stepper on the Watch screen is touched. The watch keeps
+            // its own persisted copy, so without the push on connect it could stay on older values
+            // than this phone shows — e.g. a 60 s duration from before "Until dismissed" became the
+            // default, silencing a night-time alarm the user believes rings until dismissed.
+            CoroutineScope(Dispatchers.Default).launch {
+                combine(
+                    tk.glucodata.WatchLink.nodes,
+                    preferences.watchAlarmRepeat,
+                    preferences.watchAlarmSnooze,
+                    preferences.watchAlarmTimeout,
+                ) { nodes, repeat, snooze, timeout ->
+                    WearAlarmPush(nodes.isNotEmpty(), repeat, snooze, timeout)
+                }.collectLatest { push ->
+                    if (push.hasWatch) {
+                        delay(400) // debounce rapid stepper taps; collectLatest cancels a pending push
+                        tk.glucodata.WatchLink.pushWearAlarm(push.repeatMin, push.snoozeMin, push.timeoutSec)
                     }
                 }
             }

@@ -119,8 +119,9 @@ fun WatchScreen(
             (sensorInfo?.isWarmingUp(now) == true)
 
         SettingsSection("Paired watch") {
-            // Informational row (not a navigation target) — no chevron.
-            NavRow(
+            // Informational (not a navigation target) — a StatusRow, like the transfer-state rows
+            // below: as NavRows with a no-op click they still rippled and looked tappable.
+            StatusRow(
                 Icons.Filled.Watch,
                 watch?.name ?: "No watch reachable",
                 subtitle = if (watch != null) {
@@ -128,8 +129,6 @@ fun WatchScreen(
                 } else {
                     "Install the Mogluco watch app and keep Bluetooth on"
                 },
-                trailingIcon = null,
-                onClick = {},
             )
             NavRow(
                 Icons.Filled.PlayForWork,
@@ -235,13 +234,10 @@ fun WatchScreen(
                     // this read minutes-stale while readings were in fact arriving every minute.
                     val last = latest?.epochMillis?.takeIf { it > 0 } ?: WatchLink.lastWatchDataMillis(t.nodeId)
                     val age = if (last > 0) "${((now - last) / 60_000).coerceAtLeast(0)} min ago" else "no data yet"
-                    // Informational (not a navigation target) — no chevron.
-                    NavRow(
+                    StatusRow(
                         Icons.Filled.Watch,
                         "Watch has the sensor",
                         subtitle = "Last data from watch: $age",
-                        trailingIcon = null,
-                        onClick = {},
                     )
                     NavRow(
                         Icons.Filled.Undo,
@@ -251,20 +247,18 @@ fun WatchScreen(
                     )
                 }
                 is WatchLink.TransferState.RevertedAfterTimeout -> {
-                    NavRow(
+                    StatusRow(
                         Icons.Filled.Undo,
                         "Transfer failed — sensor stayed on the phone",
                         subtitle = "The watch never confirmed. Check that the watch app runs, then try again",
-                        onClick = {},
                     )
                     SendToWatchRow(watch, canTransfer = hasLiveSensor, subtitleWhenReady = "Try again")
                 }
                 is WatchLink.TransferState.ReclaimedFromWatch -> {
-                    NavRow(
+                    StatusRow(
                         Icons.Filled.Undo,
                         "Sensor reclaimed from the watch",
                         subtitle = "The watch was unreachable too long; the phone reconnected",
-                        onClick = {},
                     )
                     SendToWatchRow(watch, canTransfer = hasLiveSensor, subtitleWhenReady = "Hand the connection back to the watch")
                 }
@@ -278,23 +272,25 @@ fun WatchScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
             )
+            // These only store the value: MoglucoApp pushes the three timings to the watch on every
+            // change and whenever the watch (re)connects.
             StepperRow(
                 "Repeat", null, if (waRepeat == 0) "Off" else "$waRepeat min",
-                onMinus = { val v = (waRepeat - 5).coerceIn(0, 240); prefs.setWatchAlarmRepeat(v); WatchLink.pushWearAlarm(v, waSnooze, waTimeout) },
-                onPlus = { val v = (waRepeat + 5).coerceIn(0, 240); prefs.setWatchAlarmRepeat(v); WatchLink.pushWearAlarm(v, waSnooze, waTimeout) },
+                onMinus = { prefs.setWatchAlarmRepeat((waRepeat - 5).coerceIn(0, 240)) },
+                onPlus = { prefs.setWatchAlarmRepeat((waRepeat + 5).coerceIn(0, 240)) },
                 onValueClick = { editWatchAlarm = "repeat" },
             )
             StepperRow(
                 "Snooze", null, if (waSnooze == 0) "Off" else "$waSnooze min",
-                onMinus = { val v = (waSnooze - 5).coerceIn(0, 240); prefs.setWatchAlarmSnooze(v); WatchLink.pushWearAlarm(waRepeat, v, waTimeout) },
-                onPlus = { val v = (waSnooze + 5).coerceIn(0, 240); prefs.setWatchAlarmSnooze(v); WatchLink.pushWearAlarm(waRepeat, v, waTimeout) },
+                onMinus = { prefs.setWatchAlarmSnooze((waSnooze - 5).coerceIn(0, 240)) },
+                onPlus = { prefs.setWatchAlarmSnooze((waSnooze + 5).coerceIn(0, 240)) },
                 onValueClick = { editWatchAlarm = "snooze" },
             )
             // 0 = ring until dismissed, the step below 15 s.
             StepperRow(
                 "Alarm duration", null, if (waTimeout == 0) "Until dismissed" else "$waTimeout s",
-                onMinus = { val v = if (waTimeout < 30) 0 else (waTimeout - 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
-                onPlus = { val v = if (waTimeout <= 0) 15 else (waTimeout + 15).coerceIn(15, 600); prefs.setWatchAlarmTimeout(v); WatchLink.pushWearAlarm(waRepeat, waSnooze, v) },
+                onMinus = { prefs.setWatchAlarmTimeout(alarmDurationStepDown(waTimeout)) },
+                onPlus = { prefs.setWatchAlarmTimeout(if (waTimeout <= 0) 15 else (waTimeout + 15).coerceIn(15, 600)) },
                 onValueClick = { editWatchAlarm = "timeout" },
             )
         }
@@ -316,9 +312,9 @@ fun WatchScreen(
                 suffix = if (which == "timeout") "s" else "min",
                 onConfirm = { v ->
                     when (which) {
-                        "repeat" -> { val x = v.coerceIn(0, 240); prefs.setWatchAlarmRepeat(x); WatchLink.pushWearAlarm(x, waSnooze, waTimeout) }
-                        "snooze" -> { val x = v.coerceIn(0, 240); prefs.setWatchAlarmSnooze(x); WatchLink.pushWearAlarm(waRepeat, x, waTimeout) }
-                        else -> { val x = if (v <= 0) 0 else v.coerceIn(15, 600); prefs.setWatchAlarmTimeout(x); WatchLink.pushWearAlarm(waRepeat, waSnooze, x) }
+                        "repeat" -> prefs.setWatchAlarmRepeat(v.coerceIn(0, 240))
+                        "snooze" -> prefs.setWatchAlarmSnooze(v.coerceIn(0, 240))
+                        else -> prefs.setWatchAlarmTimeout(if (v <= 0) 0 else v.coerceIn(15, 600))
                     }
                 },
                 onDismiss = { editWatchAlarm = null },

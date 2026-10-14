@@ -34,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Coffee
+import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.FileDownload
@@ -56,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +72,7 @@ import de.mogluco.data.EventCategory
 import de.mogluco.data.ReadingDisplay
 import de.mogluco.data.ThemeMode
 import de.mogluco.health.HealthConnectSync
+import de.mogluco.health.PushState
 import de.mogluco.ui.export.ExportSheet
 import de.mogluco.ui.util.utcToLocalDay
 
@@ -92,7 +96,9 @@ fun SettingsScreen(
     val smoothingAlpha by prefs.smoothingAlpha.collectAsStateWithLifecycle()
     val sensor by viewModel.sensor.collectAsStateWithLifecycle()
 
-    var showExport by remember { mutableStateOf(false) }
+    // Saveable: rotating while the export's file picker is open must not drop the sheet — its
+    // result would never be delivered, leaving an empty file and no message.
+    var showExport by rememberSaveable { mutableStateOf(false) }
     var showGapDialog by remember { mutableStateOf(false) }
     var showAlphaDialog by remember { mutableStateOf(false) }
     var showDeleteDate by remember { mutableStateOf(false) }
@@ -347,13 +353,8 @@ fun SettingsScreen(
     }
 
     if (showExport) {
-        val history by viewModel.history.collectAsStateWithLifecycle()
-        val events by viewModel.events.collectAsStateWithLifecycle()
         ExportSheet(
-            points = history,
-            events = events,
-            unit = unit,
-            serial = sensor?.id ?: "",
+            loadData = viewModel::exportData,
             settings = prefs.exportAll(),
             onDismiss = { showExport = false },
         )
@@ -462,6 +463,12 @@ private const val FEEDBACK_EMAIL = "feedback@woshicado.eu"
  * permission and only flips the pref on once it's granted, so the switch never reads "on" without a
  * working sync. Shows a disabled "unavailable" row when the platform SDK isn't present. The actual
  * writing happens in [HealthConnectSync].
+ *
+ * The pref can still be on without the permission: restored from a backup on another phone, or the
+ * access taken away in Health Connect. The row then says so and reads "off" — nothing is being
+ * written — and a tap asks for the access. The pref itself is left on, so that the export goes on
+ * from where it stopped once the access is there ([HealthConnectSync] keeps what it could not
+ * write pending).
  */
 @Composable
 private fun HealthConnectRow(prefs: de.mogluco.data.AppPreferences) {
@@ -469,20 +476,28 @@ private fun HealthConnectRow(prefs: de.mogluco.data.AppPreferences) {
     val scope = rememberCoroutineScope()
     val enabled by prefs.healthConnectEnabled.collectAsStateWithLifecycle()
     val available = remember { HealthConnectSync.isAvailable(context) }
+    // Whether the WRITE permission is held; null until it has been asked. Re-read on every resume
+    // (back from the permission screen or from Health Connect) and when the pref changes (a restore).
+    var permitted by remember { mutableStateOf<Boolean?>(null) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(enabled) {
+        val check = scope.launch { permitted = HealthConnectSync.hasWritePermission(context) }
+        onPauseOrDispose { check.cancel() }
+    }
+    val needsAccess = enabled && permitted == false
 
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.health.connect.client.PermissionController.createRequestPermissionResultContract(),
     ) { granted ->
-        prefs.setHealthConnectEnabled(granted.containsAll(HealthConnectSync.permissions))
+        permitted = granted.containsAll(HealthConnectSync.permissions)
+        prefs.setHealthConnectEnabled(permitted == true)
     }
 
     if (!available) {
-        NavRow(
+        // Informational only: nothing to open, so no chevron and no ripple.
+        StatusRow(
             icon = Icons.Filled.MonitorHeart,
             title = "Health Connect",
             subtitle = "Not available on this device",
-            trailingIcon = null,
-            onClick = {},
         )
         return
     }
@@ -490,8 +505,8 @@ private fun HealthConnectRow(prefs: de.mogluco.data.AppPreferences) {
     SwitchRow(
         icon = Icons.Filled.MonitorHeart,
         title = "Sync to Health Connect",
-        subtitle = "Write new readings to Health Connect",
-        checked = enabled,
+        subtitle = if (needsAccess) "Health Connect access is missing. Tap to grant it" else "Write new readings to Health Connect",
+        checked = enabled && !needsAccess,
         onCheckedChange = { on ->
             if (!on) {
                 prefs.setHealthConnectEnabled(false)
@@ -499,6 +514,7 @@ private fun HealthConnectRow(prefs: de.mogluco.data.AppPreferences) {
                 // Flip on only after the WRITE permission is granted.
                 scope.launch {
                     if (HealthConnectSync.hasWritePermission(context)) {
+                        permitted = true
                         prefs.setHealthConnectEnabled(true)
                     } else {
                         permissionLauncher.launch(HealthConnectSync.permissions)
@@ -507,24 +523,19 @@ private fun HealthConnectRow(prefs: de.mogluco.data.AppPreferences) {
             }
         },
     )
-    if (enabled) {
-        var pushing by remember { mutableStateOf(false) }
+    if (enabled && !needsAccess) {
+        // The push runs in [HealthConnectSync], not in this screen's scope: leaving Settings does
+        // not end it half-way, and coming back shows it still running, or what it did.
+        val push by HealthConnectSync.pushState.collectAsStateWithLifecycle()
         NavRow(
             icon = null,
-            title = if (pushing) "Pushing history…" else "Push history to Health Connect",
-            subtitle = "Write all stored readings once (safe to repeat)",
+            title = if (push == PushState.Pushing) "Pushing history…" else "Push history to Health Connect",
+            subtitle = (push as? PushState.Done)?.message ?: "Write all stored readings once (safe to repeat)",
             trailingIcon = null,
             onClick = {
-                if (!pushing) {
-                    pushing = true
-                    scope.launch {
-                        val repo = (context.applicationContext as de.mogluco.MoglucoApp).glucoseRepository
-                        val n = HealthConnectSync.backfill(context, repo)
-                        pushing = false
-                        val msg = if (n < 0) "Grant Health Connect access first" else "Pushed $n readings to Health Connect"
-                        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_LONG).show()
-                    }
-                }
+                // Does nothing while a push is running; the outcome comes as a toast from there.
+                val repo = (context.applicationContext as de.mogluco.MoglucoApp).glucoseRepository
+                HealthConnectSync.pushHistory(context, repo)
             },
         )
     }
@@ -547,7 +558,7 @@ private fun LibreViewDataRows(prefs: de.mogluco.data.AppPreferences) {
     var pushing by remember { mutableStateOf(false) }
 
     SwitchRow(
-        icon = null,
+        icon = Icons.Filled.CloudUpload,
         title = "Upload to LibreView",
         subtitle = "Send new readings to LibreView in the background",
         checked = uploadEnabled,
@@ -557,7 +568,7 @@ private fun LibreViewDataRows(prefs: de.mogluco.data.AppPreferences) {
         },
     )
     NavRow(
-        icon = null,
+        icon = Icons.Filled.CloudSync,
         title = if (pushing) "Pushing to LibreView…" else "Push to LibreView now",
         subtitle = "Send collected readings once (doesn't change the toggle)",
         trailingIcon = null,

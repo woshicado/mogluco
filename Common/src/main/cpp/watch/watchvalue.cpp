@@ -35,7 +35,7 @@
 #define LOGGERTAG(...) LOGGER("watchvalue: " __VA_ARGS__)
 #define LOGSTRINGTAG(...) LOGSTRING("watchvalue: " __VA_ARGS__)
 extern Sensoren *sensors;
-extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors() ; //a copy: the list itself is shared between threads (glucose.cpp)
 const int maxwatchage=maxbluetoothage;
 extern bool networkpresent;
 
@@ -71,11 +71,12 @@ std::pair<const SensorGlucoseData *,int> getlaststream(const uint32_t nu) {
    uint32_t mintime=0;
    const SensorGlucoseData *take=nullptr;
    int pos=-1;
-   const int total=usedsensors.size();
+   const std::vector<int> used=getusedsensors();
+   const int total=used.size();
    int  minutes=15;
 
     for(int i=0;i<total ;i++) {
-        const int index=usedsensors[i];
+        const int index=used[i];
         const SensorGlucoseData *hist=sensors->getSensorData(index);
         const int hiermin=hist->streaminterval();
         if(hiermin<minutes)

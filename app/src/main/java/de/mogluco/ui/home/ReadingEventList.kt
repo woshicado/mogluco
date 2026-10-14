@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -66,9 +67,6 @@ import de.mogluco.data.windowed
 import de.mogluco.data.GlucoseUnit
 import de.mogluco.data.LoggedEvent
 import de.mogluco.data.TrendArrow
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /** The event categories shown in the legend. OTHER (notes) is included so its chart markers can be
  *  toggled off like every other category — their markers are always drawn, so they need a chip. */
@@ -136,6 +134,8 @@ fun ReadingEventList(
     maximized: Boolean = false,
     onToggleMaximize: (() -> Unit)? = null,
 ) {
+    // The rows show clock times; keep the ones already composed right across a zone change.
+    FollowTimeZoneChanges()
     Column(modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SingleChoiceSegmentedButtonRow(Modifier.weight(1f)) {
@@ -144,6 +144,7 @@ fun ReadingEventList(
                         selected = m == mode,
                         onClick = { onMode(m) },
                         shape = SegmentedButtonDefaults.itemShape(i, BottomListMode.entries.size),
+                        icon = {}, // no check mark, as on every segmented control in the app
                     ) { Text(m.label) }
                 }
             }
@@ -239,7 +240,9 @@ fun ReadingRow(
             timeShort(pt.epochMillis),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(52.dp),
+            // A minimum, not a fixed width: the text is sized in sp, and at a large font scale
+            // "23:59" outgrew a fixed 52dp and wrapped. The end padding keeps it off the value then.
+            modifier = Modifier.widthIn(min = 52.dp).padding(end = 8.dp),
         )
         Text(
             "${unit.format(if (rawOnly) pt.rawMgdl else pt.calibratedMgdl)} ${unit.label}",
@@ -295,7 +298,9 @@ fun EventRow(e: LoggedEvent, onClick: (LoggedEvent) -> Unit) {
     }
 }
 
-// Reused rather than re-allocated per row/recomposition while scrolling the list.
-private val shortTimeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+// Reused rather than re-allocated per row/recomposition while scrolling the list; follows the
+// device's current time zone (see LocalTimeFormat), also for rows already on screen (see
+// FollowTimeZoneChanges).
+private val shortTimeFmt = LocalTimeFormat("HH:mm")
 
-internal fun timeShort(epochMillis: Long): String = shortTimeFmt.format(Date(epochMillis))
+internal fun timeShort(epochMillis: Long): String = shortTimeFmt.format(epochMillis)

@@ -22,11 +22,17 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 
-/** Restart the keep-alive service after a reboot so data + alarms resume unattended. */
+/**
+ * Restart the keep-alive service after a reboot or an app update (which kills the process) so
+ * data + alarms resume unattended. Both broadcasts are exempt from the background
+ * foreground-service start restriction, so the start is allowed without the app being open.
+ */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            WearGlucoseService.start(context)
+        when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            -> WearGlucoseService.start(context)
         }
     }
 }

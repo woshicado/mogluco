@@ -92,6 +92,12 @@ public class SensorBluetooth {
    * Manual "Pull history from sensor": ask every connected Libre 3 to replay its on-sensor historic
    * buffer from {@code minutes} ago ({@code <= 0} = the whole session), filling interior gaps the
    * automatic high-water-mark backfill skips. Returns how many sensors were asked (0 = none connected).
+   *
+   * <p>An announced (manual) pull only asks, and counts, sensors that are connected right now. A
+   * request stays pending in the callback until its next reading: queued on a sensor that is out of
+   * range it would report nothing to the user now ("1 sensor asked", no result) and then fire with
+   * a result toast on the first reading after the next reconnect, possibly hours later. The silent
+   * gap-fill ({@code announce} = false) keeps queueing on every registered sensor, as before.
    */
   public static int pullHistoryFromSensor(int minutes, boolean announce) {
     final var b = blueone;
@@ -102,6 +108,12 @@ public class SensorBluetooth {
     // Iterate a snapshot: gattcallbacks is mutated on the BLE thread as sensors connect/drop.
     for (var cb : new java.util.ArrayList<>(b.gattcallbacks)) {
       if (cb instanceof Libre3GattCallback) {
+        // Connected = last connect newer than the last disconnect / loss of signal / close, the
+        // callbacks' own bookkeeping (as in resetdataptr() and the Bluetooth-off handler below).
+        if (announce && !(cb.constatchange[0] > cb.constatchange[1])) {
+          Log.i(LOG_ID, "pullHistoryFromSensor: " + cb.SerialNumber + " not connected, not asked");
+          continue;
+        }
         ((Libre3GattCallback) cb).requestDeepHistory(minutes, announce);
         n++;
       }

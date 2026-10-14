@@ -218,6 +218,20 @@ public class Libre3GattCallback extends SuperGattCallback {
     }
     long tim = System.currentTimeMillis();
     if (newState == STATE_CONNECTED) {
+      // The data-phase state of the previous connection is normally cleared by realdisconnected().
+      // A connection that was torn down with close() never gets that callback — reconnect() (the
+      // watchdog / reconnectall), resetdataptr(), Bluetooth switched off — and used to leak it into
+      // this one: backFillInProgress stuck true (no history/clinical backfill and no deep pull
+      // until the next real disconnect), a half-received reading, commands encrypted for the old
+      // session still queued behind wrotecharacter. Same values realdisconnected() sets, so after
+      // a real disconnect (or on a fresh object) this changes nothing; the handshake state
+      // (isPreAuthorized, commandphase, services) is deliberately left alone.
+      cancelretrytimer();
+      oneMinuteReadingSize = 0;
+      backFillInProgress = false;
+      wrotecharacter = false;
+      sendqueue.clear();
+      abandonDeepPull();
       Sensors.notifyConnection(SerialNumber, true, status, null);
       setpriority(bluetoothGatt);
       constatchange[0] = tim;
@@ -867,6 +881,7 @@ public class Libre3GattCallback extends SuperGattCallback {
     init();
     wrotecharacter = false;
     sendqueue.clear();
+    abandonDeepPull();
     if (autoconnect && status != 19) {
       bluetoothGatt.connect();
       return;
@@ -1482,6 +1497,22 @@ public class Libre3GattCallback extends SuperGattCallback {
   // unreliable, so the app surfaces the result itself.
   private boolean deepPullActive = false;
   private int deepRecordsSaved = 0;
+
+  /**
+   * A deep pull whose connection went away before its completion arrived is over: without this the
+   * next connection's ordinary backfill completion would be taken for the pull's and report a
+   * partial (or zero: "not on the sensor") result for a pull that was cut off.
+   */
+  private void abandonDeepPull() {
+    if (!deepPullActive) return;
+    deepPullActive = false;
+    if (deepRecordsSaved > 0) {
+      Engine.dispatchInvalidate(); // what did arrive is in the store: show it
+    }
+    if (deepPullAnnounce) {
+      Sensors.notifyDeepPull(SerialNumber, -1);
+    }
+  }
   // Whether the pending / in-flight deep pull should report its result to the UI (manual button) or
   // stay silent (automatic gap-fill on reconnect). deepAnnounce is the queued value; deepPullAnnounce
   // is captured when the pull actually fires.
@@ -1495,6 +1526,12 @@ public class Libre3GattCallback extends SuperGattCallback {
 
   /** As above; [announce]=false keeps it silent (automatic gap-fill), true reports to the UI. */
   void requestDeepHistory(int minutes, boolean announce) {
+    // A manual pull still waiting to fire is not replaced by the silent gap-fill that follows a
+    // reconnect: it covers at least the same range, and replaced it would run without the
+    // result the user is waiting for (no toast, the spinner running into its timeout).
+    if (!announce && deepHistoryMinutes != 0 && deepAnnounce) {
+      return;
+    }
     deepAnnounce = announce;
     deepHistoryMinutes = (minutes <= 0) ? Integer.MAX_VALUE : minutes;
   }
@@ -1507,6 +1544,14 @@ public class Libre3GattCallback extends SuperGattCallback {
   private void maybeFireDeepPull() {
     int pending = deepHistoryMinutes;
     if (pending == 0 || backFillInProgress) {
+      return;
+    }
+    if (wrotecharacter) {
+      // Another command is still in flight without counting as a backfill (the event-log fetch).
+      // qsendcommand would only QUEUE the pull behind it and return false: the UI got "failed",
+      // the pull then ran anyway — unannounced and without the reload on completion — and the
+      // first command's completion could not be told from the pull's. Leave the request pending;
+      // this is called again with the next reading (~1 min), when the channel is free.
       return;
     }
     deepHistoryMinutes = 0; // one-shot

@@ -43,41 +43,53 @@ class BootReceiver : BroadcastReceiver() {
         }.onFailure { postOpenAppNotification(context) }
     }
 
-    /** A plain high-priority notification: alarms are NOT running until Mogluco is opened. */
-    private fun postOpenAppNotification(context: Context) {
-        ensureChannel(context)
-        val tap = PendingIntent.getActivity(
-            context, 0, Intent(context, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val n = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("Glucose alarms not running")
-            .setContentText("Open Mogluco to restart glucose monitoring and alarms.")
-            .setContentIntent(tap)
-            .setCategory(NotificationCompat.CATEGORY_ERROR)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setAutoCancel(true)
-            .build()
-        runCatching { context.getSystemService(NotificationManager::class.java).notify(NOTIF_ID, n) }
-    }
+    companion object {
+        private const val CHANNEL_ID = "boot_restart_v1"
+        private const val NOTIF_ID = 0xB001
 
-    private fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val mgr = context.getSystemService(NotificationManager::class.java)
-        if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(
-            CHANNEL_ID, "Monitoring interrupted", NotificationManager.IMPORTANCE_HIGH,
-        ).apply {
-            description = "Warns when glucose monitoring couldn't restart after a reboot"
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        /**
+         * A plain high-priority notification: alarms are NOT (reliably) running until Mogluco is
+         * opened. Also used by [GlucoseNotificationService] when the system refuses its restart.
+         */
+        fun postOpenAppNotification(context: Context) {
+            ensureChannel(context)
+            val tap = PendingIntent.getActivity(
+                context, 0, MainActivity.resumeIntent(context),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val n = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle("Glucose alarms not running")
+                .setContentText("Open Mogluco to restart glucose monitoring and alarms.")
+                .setContentIntent(tap)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setAutoCancel(true)
+                .build()
+            runCatching { context.getSystemService(NotificationManager::class.java).notify(NOTIF_ID, n) }
         }
-        mgr.createNotificationChannel(channel)
-    }
 
-    private companion object {
-        const val CHANNEL_ID = "boot_restart_v1"
-        const val NOTIF_ID = 0xB001
+        /**
+         * Take the warning down again: [GlucoseNotificationService] is in the foreground, so
+         * monitoring runs. Otherwise it would stay up after the app was opened from the launcher
+         * rather than by tapping it.
+         */
+        fun cancelOpenAppNotification(context: Context) {
+            runCatching { context.getSystemService(NotificationManager::class.java).cancel(NOTIF_ID) }
+        }
+
+        private fun ensureChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val mgr = context.getSystemService(NotificationManager::class.java)
+            if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
+            val channel = NotificationChannel(
+                CHANNEL_ID, "Monitoring interrupted", NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Warns when glucose monitoring couldn't restart after a reboot"
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            mgr.createNotificationChannel(channel)
+        }
     }
 }

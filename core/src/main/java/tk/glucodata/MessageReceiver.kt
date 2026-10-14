@@ -58,7 +58,10 @@ class MessageReceiver : WearableListenerService() {
                     val node: Node = nodes.elementAt(it)
                     galaxy = isGalaxy(node)
                 }
-                if (Natives.setmynetinfo(name, data, galaxy)) {
+                val applied = Natives.setmynetinfo(name, data, galaxy)
+                // Before the reply below, so that it already carries the re-asserted role.
+                if (!isWearable) WatchLink.onPeerNetinfoApplied(sourceId)
+                if (applied) {
                     sendnetinfo(sourceId)
                 }
             }
@@ -140,6 +143,8 @@ class MessageReceiver : WearableListenerService() {
                 if (payload.isNotEmpty()) {
                     MessageSender.sendHistory(messageEvent.sourceNodeId, payload)
                 }
+                // The watch asks when it (re)gains the phone: keep its alarm timings in step too.
+                if (!isWearable) WatchLink.resendWearAlarm()
             }
             MessageSender.HISTORY_PATH -> {
                 // Additive (redesign): a catch-up batch — merge it into our store (dedupes).

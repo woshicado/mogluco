@@ -101,7 +101,7 @@ if(save.getStreamendhistory()) {
 return true;
 }
 
-extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors();
 extern void setusedsensors();
 void setstartedwithStreamhistory() {
 	if(SensorGlucoseData *sens=sensors->getSensorData()) {
@@ -113,7 +113,7 @@ void setstartedwithStreamhistory() {
 		return;
 		}
 	setusedsensors();
-	for(int index:usedsensors) {
+	for(int index:getusedsensors()) { // a copy taken under the list's lock (glucose.cpp)
 		  SensorGlucoseData *sens=sensors->getSensorData(index );
 		  if(sens&&sens->isLibre2()) {
 			sens->getinfo()->startedwithStreamhistory=std::max(sens->getinfo()->endhistory,1);
@@ -125,7 +125,7 @@ void setendedwithStreamhistory() {
 	if(!settings->data()->streamHistLib) 
 		return;
 	setusedsensors();
-	for(int index:usedsensors) {
+	for(int index:getusedsensors()) { // a copy taken under the list's lock (glucose.cpp)
 		  SensorGlucoseData *sens=sensors->getSensorData(index );
 		  if(sens&&sens->isLibre2()) {
 			sens->getinfo()->startedwithStreamhistory=0;

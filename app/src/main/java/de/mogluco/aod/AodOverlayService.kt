@@ -19,7 +19,9 @@
 package de.mogluco.aod
 
 import android.accessibilityservice.AccessibilityService
+import android.app.AlarmManager
 import android.app.KeyguardManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -34,8 +36,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
+import android.text.format.DateUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -66,7 +70,10 @@ import de.mogluco.data.glucoseState
 import de.mogluco.notification.TrendGraphRenderer
 import de.mogluco.ui.home.TrendArrowShape
 import de.mogluco.ui.theme.DarkGlucoseColors
+import de.mogluco.ui.theme.DarkOnSurfaceVariant
 import de.mogluco.ui.theme.colorFor
+import de.mogluco.ui.util.nextLocalMidnight
+import de.mogluco.ui.util.startOfDay
 
 /**
  * Opt-in "true always-on display" overlay.
@@ -102,6 +109,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
 
     private var overlayView: View? = null
     private var valueText: TextView? = null
+    private var ageText: TextView? = null
     private var arrowImage: ImageView? = null
     private var graphImage: ImageView? = null
     private var params: WindowManager.LayoutParams? = null
@@ -119,6 +127,9 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
     private var jitterJob: Job? = null
     private var jitterX = 0
     private var jitterY = 0
+
+    // The alarm that re-renders the overlay when no new reading does (see [scheduleAgeTick]).
+    private var ageTick: PendingIntent? = null
 
     // Latest data, cached so the overlay can be (re)drawn on screen-on without waiting for a new emission.
     @Volatile private var snapshot: Snapshot? = null
@@ -139,6 +150,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
                 Intent.ACTION_SCREEN_OFF -> { isScreenOn = false; updateVisibility() }
                 Intent.ACTION_SCREEN_ON -> { isScreenOn = true; isLocked = resolveLocked(); updateVisibility() }
                 Intent.ACTION_USER_PRESENT -> { isLocked = false; updateVisibility() }
+                ACTION_AGE_TICK -> if (overlayView?.visibility == View.VISIBLE) updateContent()
             }
         }
     }
@@ -160,6 +172,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
+            addAction(ACTION_AGE_TICK)
         }
         ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         receiverRegistered = true
@@ -247,6 +260,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
     private fun hideOverlay() {
         jitterJob?.cancel()
         jitterJob = null
+        cancelAgeTick()
         sensorManager?.unregisterListener(this)
         val view = overlayView ?: return
         runCatching { windowManager?.removeView(view) }
@@ -271,6 +285,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
     private fun clearOverlayRefs() {
         overlayView = null
         valueText = null
+        ageText = null
         arrowImage = null
         graphImage = null
         params = null
@@ -322,6 +337,14 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
         }
         valueRow.addView(value)
         valueRow.addView(arrow)
+        // Shown only under a stale (greyed) value: when that value was taken.
+        val age = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setTextColor(DarkOnSurfaceVariant.toArgb())
+            gravity = Gravity.CENTER_HORIZONTAL
+            maxLines = 1
+            visibility = View.GONE
+        }
         val graph = ImageView(this).apply {
             adjustViewBounds = true
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(130)).apply {
@@ -329,9 +352,11 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
             }
         }
         root.addView(valueRow)
+        root.addView(age)
         root.addView(graph)
         overlayView = root
         valueText = value
+        ageText = age
         arrowImage = arrow
         graphImage = graph
     }
@@ -340,26 +365,41 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
         val s = snapshot ?: return
         val tv = valueText ?: return
         val reading = s.reading
+        val now = System.currentTimeMillis()
         if (reading != null) {
+            // An old value must not keep looking current — after a disconnect the overlay can sit
+            // there all night. Past the staleness threshold it is shown as Home shows it: greyed,
+            // without the trend arrow (a direction that no longer holds), and with when it was taken.
+            val stale = reading.isStale(now, STALE_MILLIS)
             val state = glucoseState(reading.calibratedMgdl, s.targetRange.start, s.targetRange.endInclusive)
-            val color = stateColor(state)
+            val color = if (stale) DarkGlucoseColors.stale.toArgb() else stateColor(state)
             tv.text = s.unit.format(reading.calibratedMgdl)
             tv.setTextColor(color)
             // Same hand-drawn, rate-tilted arrow as the in-app reading (see ui/home/TrendArrow.kt),
             // rather than a static unicode glyph, so the AOD matches the app.
             arrowImage?.let { iv ->
-                iv.setImageBitmap(arrowBitmap(reading.trendAngleDegrees, color, dp(48)))
-                iv.visibility = View.VISIBLE
+                if (stale) {
+                    iv.visibility = View.GONE
+                } else {
+                    iv.setImageBitmap(arrowBitmap(reading.trendAngleDegrees, color, dp(48)))
+                    iv.visibility = View.VISIBLE
+                }
+            }
+            ageText?.let { at ->
+                at.text = if (stale) takenAtLabel(reading.epochMillis, now) else null
+                at.visibility = if (stale) View.VISIBLE else View.GONE
             }
         } else {
             tv.text = "--"
             tv.setTextColor(Color.WHITE)
             arrowImage?.visibility = View.GONE
+            ageText?.visibility = View.GONE
         }
+        scheduleAgeTick(reading, now)
         graphImage?.let { img ->
             val w = (resources.displayMetrics.widthPixels * 0.9f).toInt().coerceAtLeast(1)
             val bmp = TrendGraphRenderer.lineGraph(
-                s.history, System.currentTimeMillis(), windowMillis = 3 * 60 * 60_000L,
+                s.history, now, windowMillis = 3 * 60 * 60_000L,
                 widthPx = w, heightPx = dp(130), padPx = dp(6).toFloat(),
                 strokePx = dp(2).toFloat(), dotPx = dp(3).toFloat(), gridStrokePx = 1.5f,
                 targetLow = s.targetRange.start, targetHigh = s.targetRange.endInclusive,
@@ -376,6 +416,69 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
         // Content (value + arrow) just changed the overlay's height; re-anchor once it re-lays out
         // so the percentage position stays centered.
         overlayView?.post { applyPosition() }
+    }
+
+    /**
+     * (Re)arms the one alarm that re-renders the overlay when no new reading does: at the moment
+     * the shown reading turns stale, and for a stale one at the next local midnight, when its
+     * label gains the date (see [takenAtLabel]). Nothing in between — the label is a clock time,
+     * which stays right without re-rendering. Every render re-arms it, so with a live sensor it
+     * never fires.
+     *
+     * An inexact allow-while-idle alarm, not a coroutine delay: on the always-on display the CPU
+     * is asleep most of the time, a delay only counts awake time (it would fire hours late), and
+     * Doze defers ordinary alarms to its maintenance windows.
+     */
+    private fun scheduleAgeTick(reading: GlucoseReading?, now: Long) {
+        if (reading == null) {
+            cancelAgeTick()
+            return
+        }
+        val alarms = getSystemService(AlarmManager::class.java) ?: return
+        val tick = ageTick ?: PendingIntent.getBroadcast(
+            this, 0, Intent(ACTION_AGE_TICK).setPackage(packageName), PendingIntent.FLAG_IMMUTABLE,
+        ).also { ageTick = it }
+        val age = reading.ageMillis(now)
+        // +1 s so the render lands past the boundary.
+        val delayMillis = if (age <= STALE_MILLIS) {
+            STALE_MILLIS - age + 1_000
+        } else {
+            nextLocalMidnight(startOfDay(now)) - now + 1_000
+        }
+        // Setting it again replaces the pending one (same PendingIntent). Allow-while-idle only
+        // with the battery exemption, as the readout notification's stale tick does: without it
+        // an app gets about one such alarm per nine minutes in deep Doze, and this cosmetic one
+        // must not take the slot the signal-loss check needs.
+        val at = SystemClock.elapsedRealtime() + delayMillis
+        val exempt = runCatching {
+            getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        }.getOrDefault(false)
+        if (exempt) {
+            alarms.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tick)
+        } else {
+            alarms.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, tick)
+        }
+    }
+
+    private fun cancelAgeTick() {
+        ageTick?.let { getSystemService(AlarmManager::class.java)?.cancel(it) }
+    }
+
+    /**
+     * When a stale reading was taken, as a clock time in the user's locale and 12/24-hour setting:
+     * "at 02:00", or with the date ("10 Oct, 02:00") once it is no longer today's. A relative "N min
+     * ago" was only as current as its last render, and the overlay re-renders rarely (and late,
+     * under Doze): it read "6 min ago" for the ten minutes after the reading turned stale.
+     */
+    private fun takenAtLabel(epochMillis: Long, now: Long): String {
+        if (startOfDay(epochMillis) == startOfDay(now)) {
+            return "at " + DateUtils.formatDateTime(this, epochMillis, DateUtils.FORMAT_SHOW_TIME)
+        }
+        return DateUtils.formatDateTime(
+            this,
+            epochMillis,
+            DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH,
+        )
     }
 
     /**
@@ -448,6 +551,7 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
     }
 
     private fun teardown() {
+        cancelAgeTick()
         sensorManager?.unregisterListener(this)
         if (receiverRegistered) {
             runCatching { unregisterReceiver(screenReceiver) }
@@ -463,6 +567,15 @@ class AodOverlayService : AccessibilityService(), SensorEventListener {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
+        /**
+         * Past this age the overlay stops presenting a reading as current. The same threshold as
+         * [GlucoseReading.isStale]'s default, which Home greys its reading at.
+         */
+        private const val STALE_MILLIS = 6 * 60_000L
+
+        /** Private broadcast the age alarm delivers to this service's (non-exported) receiver. */
+        private const val ACTION_AGE_TICK = "de.mogluco.aod.AGE_TICK"
+
         /** Whether the overlay accessibility service is currently enabled in system settings. */
         fun isEnabled(context: Context): Boolean {
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return false

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Snooze
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.material3.Icon
 import androidx.wear.compose.material3.IconButton
@@ -114,9 +115,19 @@ class WearAlarmActivity : ComponentActivity() {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {
-                        Text(title, style = MaterialTheme.typography.titleLarge, color = androidx.compose.ui.graphics.Color.LightGray)
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = androidx.compose.ui.graphics.Color.LightGray,
+                            textAlign = TextAlign.Center,
+                        )
                         if (text.isNotEmpty()) {
-                            Text(text, style = MaterialTheme.typography.bodyMedium, color = androidx.compose.ui.graphics.Color.Gray)
+                            Text(
+                                text,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = androidx.compose.ui.graphics.Color.Gray,
+                                textAlign = TextAlign.Center,
+                            )
                         }
                     }
                     return@WearTheme
@@ -132,9 +143,12 @@ class WearAlarmActivity : ComponentActivity() {
                         tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(28.dp),
                     )
+                    // Centred lines: a detail that wraps ("This is how alarms feel on the watch.")
+                    // must not run flush left into the edge of a round screen.
                     Text(
                         title,
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = 4.dp),
                     )
                     if (text.isNotEmpty()) {
@@ -142,6 +156,8 @@ class WearAlarmActivity : ComponentActivity() {
                             text,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp),
                         )
                     }
                     Row(
@@ -180,15 +196,17 @@ class WearAlarmActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        visible = true
+        started++
     }
 
     override fun onStop() {
-        visible = false
-        // Pushed into the background while still ringing (a leave that wasn't a crown press, or the
-        // system covering us): ask the service to bring the surface back so the alarm never rings
-        // on an unrelated screen with nothing to dismiss it from.
-        if (!isFinishing && WearAlarmService.ringing.value != null) {
+        started--
+        // Left the screen while still ringing (a leave that wasn't a crown press, the system
+        // covering us, or a swipe/back that finished us — every real dismiss clears the ringing
+        // state first): ask the service to bring the surface back so the alarm never rings on an
+        // unrelated screen with nothing to dismiss it from. After a plain screen-off the service
+        // waits for the screen to turn on again instead of waking it.
+        if (WearAlarmService.ringing.value != null) {
             WearAlarmService.requestSurface(this)
         }
         super.onStop()
@@ -251,9 +269,12 @@ class WearAlarmActivity : ComponentActivity() {
         /** A leave hint this soon after entering ambient is the system's, not the crown. */
         private const val AMBIENT_GRACE_MS = 1_500L
 
-        /** Whether the surface is currently on screen — gates the service's launch retries. */
+        // Started instances, not a flag: when a relaunch replaces a finishing instance, the new
+        // one's onStart runs before the old one's onStop, which must not mark the surface gone.
         @Volatile
-        var visible: Boolean = false
-            internal set
+        private var started = 0
+
+        /** Whether the surface is currently on screen — gates the service's launch retries. */
+        val visible: Boolean get() = started > 0
     }
 }

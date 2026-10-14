@@ -65,6 +65,20 @@ apk="$(ls -t app/build/outputs/apk/*/*.apk 2>/dev/null | head -1)"
 echo "Built: ${apk:-<none>}"
 '''
 
+[tasks.test]
+description = "Run the unit tests."
+# Gradle 8.13 cannot create test tasks under JDK 25, which is what current Android Studio bundles
+# (JAVA_HOME above) — assembling works, `test` fails with "Type T not present". Use an installed
+# JDK 17 or 21 for this task instead.
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+for v in 17 21; do
+  if jdk="$(/usr/libexec/java_home -v "$v" 2>/dev/null)"; then export JAVA_HOME="$jdk"; break; fi
+done
+./gradlew :app:testDebugUnitTest
+'''
+
 [tasks.docs]
 description = "Generate docs with mkdocs."
 usage = '''

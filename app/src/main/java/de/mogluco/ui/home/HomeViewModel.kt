@@ -39,6 +39,8 @@ import de.mogluco.data.LoggedEvent
 import de.mogluco.data.ReadingDisplay
 import de.mogluco.data.SensorInfo
 import de.mogluco.data.curatedDisplayTypes
+import de.mogluco.ui.export.ExportData
+import de.mogluco.ui.export.loadExportData
 
 data class HomeUiState(
     val reading: GlucoseReading? = null,
@@ -47,6 +49,8 @@ data class HomeUiState(
     val targetHigh: Double = 180.0,
     val history: List<GlucosePoint> = emptyList(),
     val sensor: SensorInfo? = null,
+    /** A newly activated sensor whose setup is failing while [sensor] is still the previous one. */
+    val newSensorFault: SensorInfo? = null,
     /** Every stored sensor (past + present), oldest first — the calendar's per-day sensor. */
     val sensorHistory: List<SensorInfo> = emptyList(),
     val readingDisplay: ReadingDisplay = ReadingDisplay.BOTH,
@@ -58,7 +62,7 @@ data class HomeUiState(
 )
 
 class HomeViewModel(
-    repository: GlucoseRepository,
+    private val repository: GlucoseRepository,
     private val eventRepository: EventRepository,
     prefs: AppPreferences,
 ) : ViewModel() {
@@ -112,9 +116,18 @@ class HomeViewModel(
         DisplayState(display, band, kinds, categories, gapMin * 60_000L, filtered)
     }
 
+    /**
+     * The readings and events for an export, read from the repositories when the file is written;
+     * null while the stored history is still loading (see [loadExportData]). Every logged event,
+     * including the kinds hidden by Settings → Event logging: [uiState]'s events are
+     * display-filtered, and an export must not lose data to that.
+     */
+    suspend fun exportData(): ExportData? = loadExportData(repository, eventRepository)
+
     val uiState: StateFlow<HomeUiState> =
-        combine(core, display, repository.sensorHistory) { state, d, sensors ->
+        combine(core, display, repository.sensorHistory, repository.newSensorFault) { state, d, sensors, newSensor ->
             state.copy(
+                newSensorFault = newSensor,
                 sensorHistory = sensors,
                 readingDisplay = d.display,
                 showTargetBand = d.band,

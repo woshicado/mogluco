@@ -85,11 +85,18 @@
                 android:value="Rings a medical glucose alarm (sound + vibration) until acknowledged" />
         </service>
 
+        <!-- AlarmManager-backed signal-loss deadline (fires while the watch is suspended). -->
+        <receiver
+            android:name="de.mogluco.wear.alarm.WearSignalLossReceiver"
+            android:exported="false" />
+
+        <!-- Restarts the keep-alive service after a reboot and after an app update. -->
         <receiver
             android:name="de.mogluco.wear.service.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

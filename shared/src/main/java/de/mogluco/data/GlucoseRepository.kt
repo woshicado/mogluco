@@ -40,6 +40,16 @@ interface GlucoseRepository {
     /** Recent glucose history for the graph, oldest-first. */
     val history: Flow<List<GlucosePoint>>
 
+    /**
+     * Whether [history] holds what the store holds. False from the start of the process until the
+     * stored readings have been read for the first time — until then an empty (or nearly empty)
+     * [history] says nothing about what there is, and must not be taken for it (an export would
+     * write a file without data). True from then on, also for a store that holds nothing.
+     * Default: true — a repository that has its data from the start.
+     */
+    val historyLoaded: Flow<Boolean>
+        get() = kotlinx.coroutines.flow.flowOf(true)
+
     /** The active sensor (id, activation, expiry, error), or null when none is running. */
     val sensor: Flow<SensorInfo?>
 
@@ -56,6 +66,16 @@ interface GlucoseRepository {
      * flow. Reflects the same value the [sensor] flow last emitted.
      */
     val currentSensor: SensorInfo?
+
+    /**
+     * A second, newly activated sensor whose setup is failing while [sensor] is still the previous
+     * one (it keeps the current value, the alarms and the card until the new sensor delivers its
+     * first reading): its id, activation and the failure in [SensorInfo.error]. Null when there is
+     * no such sensor — always with a single active sensor — and again once it delivers, is the
+     * one in [sensor], or is no longer in use. Default: none.
+     */
+    val newSensorFault: Flow<SensorInfo?>
+        get() = kotlinx.coroutines.flow.flowOf(null)
 
     /**
      * Epoch millis of the latest reading (or 0), a synchronous peek matching the [latest] flow. Used

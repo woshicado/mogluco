@@ -22,6 +22,8 @@
 /*      Fri Jan 27 12:35:35 CET 2023                                                 */
 
 
+#include <mutex>
+#include <vector>
 #include "settings/settings.hpp"
 #include "datbackup.hpp"
 #include "secs.h"
@@ -540,9 +542,18 @@ int writeStartime(crypt_t *pass, const int sock, const int sensorindex) {
     }
 
 std::vector<int> usedsensors;
+// usedsensors is rewritten and read from several threads (main thread, BLE callbacks, the mirror
+// threads, the alarm controllers' background checks through Natives.activeSensors()). Unguarded,
+// two writers both free the old buffer and a reader can index or iterate a buffer that was just
+// freed. So: writers build the new list first and swap it in under this mutex, readers take a copy
+// under it (getusedsensors()) and work on the copy. A leaf lock: nothing is called while it is
+// held, apart from copying the list.
+static std::mutex usedsensorsmutex;
 void setusedsensors(uint32_t nu) {
     uint32_t recent=nu-daysecs;    
-    usedsensors=sensors->bluetoothactive(recent,nu);
+    std::vector<int> newused=sensors->bluetoothactive(recent,nu);
+    std::lock_guard<std::mutex> lock(usedsensorsmutex);
+    usedsensors.swap(newused); //the old list is freed after the unlock, with newused
     }
 
 extern void setusedsensors() ;
@@ -550,18 +561,24 @@ void setusedsensors() {
     uint32_t nu=time(nullptr);    
     setusedsensors(nu);
     }
-    extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors() ;
+std::vector<int> getusedsensors() {
+    std::lock_guard<std::mutex> lock(usedsensorsmutex);
+    return usedsensors;
+    }
 uint32_t sendstreamfrom()  {
     extern void setusedsensors() ;
-    if(!usedsensors.size()) {
+    std::vector<int> used=getusedsensors();
+    if(!used.size()) {
         setusedsensors();
-        if(!usedsensors.size())  {
+        used=getusedsensors();
+        if(!used.size())  {
          LOGAR("sendstreamfrom()=0 usedsensors.size()==0");
             return 0;
            }
         }
     uint32_t lasttime=UINT32_MAX;    
-    for(const int i:usedsensors) {
+    for(const int i:used) {
         if(const SensorGlucoseData *hist = sensors->getSensorData(i)) {
          uint32_t tim = hist->getlastpolltime();
          if(!tim) {

@@ -127,7 +127,8 @@ fun AverageScreen(viewModel: HomeViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
     ) {
-        Text("Average day", style = MaterialTheme.typography.headlineSmall)
+        // Same title style as the other tab that has one (Settings).
+        Text("Average day", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
 
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
@@ -136,6 +137,7 @@ fun AverageScreen(viewModel: HomeViewModel) {
                     selected = i == rangeIndex,
                     onClick = { rangeIndex = i },
                     shape = SegmentedButtonDefaults.itemShape(i, AvgRange.entries.size),
+                    icon = {}, // no check mark, as on every segmented control in the app
                 ) { Text(r.label) }
             }
         }

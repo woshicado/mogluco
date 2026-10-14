@@ -108,6 +108,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
@@ -116,6 +118,7 @@ import kotlin.math.roundToInt
 import de.mogluco.data.EventCategory
 import de.mogluco.data.EventType
 import de.mogluco.data.LoggedEvent
+import de.mogluco.ui.settings.filterDecimalInput
 import de.mogluco.ui.util.addDays
 import de.mogluco.ui.util.localDayToUtc
 import de.mogluco.ui.util.startOfDay
@@ -249,8 +252,14 @@ fun AddEventFab(
 
 @Composable
 private fun MiniFabRow(type: EventType, onClick: () -> Unit) {
-    val color = eventColor(type.category)
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // One button per row: label and circle are the two halves of a single target (the label is
+    // the larger and more obvious one), announced once by the label's text.
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(role = Role.Button, onClick = onClick),
+    ) {
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = MaterialTheme.shapes.small,
@@ -268,14 +277,15 @@ private fun MiniFabRow(type: EventType, onClick: () -> Unit) {
         // The circle is centered inside a FAB-width box so it sits exactly above the +/× FAB.
         Box(Modifier.width(FabSize), contentAlignment = Alignment.Center) {
             Surface(
-                onClick = onClick,
                 shape = CircleShape,
-                color = color,
-                contentColor = Color.White,
+                color = eventColor(type.category),
+                // Black or white by the fill's luminance, like the chart's event pills — fixed
+                // white was about 2:1 on the amber and green circles.
+                contentColor = onEventColor(type.category),
                 modifier = Modifier.size(44.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(eventIcon(type.category, type.name), contentDescription = type.name)
+                    Icon(eventIcon(type.category, type.name), contentDescription = null)
                 }
             }
         }
@@ -292,16 +302,21 @@ fun EventEditSheet(
     onDismiss: () -> Unit,
     onSave: (type: EventType, value: Float, atMillis: Long, note: String) -> Unit,
     onDelete: ((LoggedEvent) -> Unit)? = null,
+    // The day a NEW event defaults to (the day the caller is showing); null = today.
+    newEventDay: Long? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sheetScope = rememberCoroutineScope()
+    // An edited event keeps its own type preselected and offered as a chip even when [types] no
+    // longer has it (its kind was turned off in Settings → Event logging): falling back to the
+    // first enabled type opened the sheet already dirty, and Update rewrote the event as that type.
+    val ownType = remember(types, existing) { existing?.let { ownEventType(types, it) } }
+    val chipTypes = remember(types, ownType) { editChipTypes(types, ownType) }
     // Every field is rememberSaveable so a configuration change (rotation, dark-mode toggle)
     // mid-entry can't wipe what the user typed. The time itself is already saveable inside
     // rememberTimePickerState.
     var selected by rememberSaveable(stateSaver = EventTypeSaver) {
-        mutableStateOf(
-            existing?.let { e -> types.firstOrNull { it.index == e.type } } ?: initialType ?: types.firstOrNull(),
-        )
+        mutableStateOf(if (existing != null) ownType else initialType ?: types.firstOrNull())
     }
     var amount by rememberSaveable { mutableStateOf(existing?.value?.let { trimFloat(it) } ?: "") }
     var note by rememberSaveable { mutableStateOf(existing?.note ?: "") }
@@ -312,8 +327,11 @@ fun EventEditSheet(
         initialMinute = cal.get(Calendar.MINUTE),
         is24Hour = true,
     )
-    // The day the event is logged for (time picker only covers hour/minute).
-    var dayMillis by rememberSaveable { mutableStateOf(startOfDay(cal.timeInMillis)) }
+    // The day the event is logged for (time picker only covers hour/minute). A new event takes
+    // the caller's day (the day-detail page of a past day) with the current time of day.
+    var dayMillis by rememberSaveable {
+        mutableStateOf(startOfDay(newEventDay?.takeIf { existing == null } ?: cal.timeInMillis))
+    }
     var showDatePicker by rememberSaveable { mutableStateOf(false) }
     var showTimePicker by rememberSaveable { mutableStateOf(false) }
     var showDiscard by rememberSaveable { mutableStateOf(false) }
@@ -365,7 +383,7 @@ fun EventEditSheet(
             androidx.compose.foundation.layout.FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                types.forEach { type ->
+                chipTypes.forEach { type ->
                     androidx.compose.material3.FilterChip(
                         selected = selected == type,
                         onClick = { selected = type },
@@ -393,7 +411,10 @@ fun EventEditSheet(
             }
             OutlinedTextField(
                 value = amount,
-                onValueChange = { new -> amount = new.filter { it.isDigit() || it == '.' } },
+                // Comma-decimal keyboards emit ','; a digits-and-dot filter dropped it, turning
+                // "1,5" U into 15. filterDecimalInput keeps one separator and normalizes it to
+                // '.', so the toFloatOrNull() parse below always sees a plain decimal.
+                onValueChange = { new -> amount = filterDecimalInput(new) },
                 label = { Text("Amount" + (selected?.unit?.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: "")) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -533,6 +554,26 @@ private val EventTypeSaver = listSaver<EventType?, Any>(
     save = { t -> if (t == null) emptyList() else listOf(t.index, t.name, t.category.name) },
     restore = { l -> EventType(l[0] as Int, l[1] as String, EventCategory.valueOf(l[2] as String)) },
 )
+
+/**
+ * The type an existing event is edited as: the menu's entry for its native index, or — when
+ * [types] doesn't offer it (kind disabled, or an index outside the curated menu) — a type rebuilt
+ * from the event itself, so opening the sheet can never re-type it.
+ */
+internal fun ownEventType(types: List<EventType>, event: LoggedEvent): EventType =
+    types.firstOrNull { it.index == event.type }
+        ?: EventType(event.type, event.label.ifEmpty { "Event" }, event.category)
+
+/**
+ * The sheet's type chips: [types], plus [own] when it isn't among them. It takes the place of a
+ * same-named entry (a stored "Walk" vs the menu's single "Activity") rather than showing that
+ * name twice; otherwise it goes last.
+ */
+internal fun editChipTypes(types: List<EventType>, own: EventType?): List<EventType> {
+    if (own == null || own in types) return types
+    val twin = types.indexOfFirst { it.name == own.name && it.category == own.category }
+    return if (twin >= 0) types.toMutableList().also { it[twin] = own } else types + own
+}
 
 private fun timeChipLabel(hour: Int, minute: Int): String = "%02d:%02d".format(hour, minute)
 

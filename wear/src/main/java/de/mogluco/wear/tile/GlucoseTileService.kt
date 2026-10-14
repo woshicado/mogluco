@@ -54,7 +54,8 @@ import de.mogluco.wear.ui.home.ageText
 /**
  * Swipe-accessible glucose tile: state-colored value + trend glyph, reading age, and the
  * shared mini trend graph (last 3 h). Refreshed by [de.mogluco.wear.service.WearGlucoseService]
- * pushes on each reading (plus a 60 s freshness hint for the ager line).
+ * pushes on each reading (plus a 60 s freshness hint for the ager line). A live value carries
+ * its expiry, so the system itself falls back to the stale rendering when nothing refreshes it.
  */
 class GlucoseTileService : TileService() {
 
@@ -62,18 +63,39 @@ class GlucoseTileService : TileService() {
         requestParams: RequestBuilders.TileRequest,
     ): ListenableFuture<TileBuilders.Tile> = CallbackToFutureAdapter.getFuture { completer ->
         val snapshot = runBlocking { GlucoseSnapshot.read(this@GlucoseTileService) }
-        val tile = TileBuilders.Tile.Builder()
-            .setResourcesVersion(resourcesVersion(snapshot))
-            .setFreshnessIntervalMillis(60_000)
-            .setTileTimeline(
-                TimelineBuilders.Timeline.Builder()
-                    .addTimelineEntry(
-                        TimelineBuilders.TimelineEntry.Builder()
-                            .setLayout(Layout.Builder().setRoot(layout(snapshot)).build())
-                            .build(),
+        val now = System.currentTimeMillis()
+        val timeline = TimelineBuilders.Timeline.Builder()
+        // A live value is only valid until its reading turns stale; from then on the system
+        // shows the default entry below ("--", grey dot) by itself. It switches on the wall clock
+        // without waking the watch or asking this app, so a tile that was cached while the watch
+        // slept never comes up with an old value as the current one.
+        val usableUntil = snapshot.usableUntilMillis?.takeIf { snapshot.isUsable(now) }
+        if (usableUntil != null) {
+            timeline.addTimelineEntry(
+                TimelineBuilders.TimelineEntry.Builder()
+                    .setLayout(Layout.Builder().setRoot(layout(snapshot, now)).build())
+                    .setValidity(
+                        TimelineBuilders.TimeInterval.Builder().setEndMillis(usableUntil + 1).build(),
                     )
                     .build(),
             )
+        }
+        // No validity = the default entry: the stale rendering, or the tile as it is right now
+        // when there is no live value to begin with.
+        val fallback = if (usableUntil != null) {
+            layout(snapshot, usableUntil + 1, shownLater = true)
+        } else {
+            layout(snapshot, now)
+        }
+        timeline.addTimelineEntry(
+            TimelineBuilders.TimelineEntry.Builder()
+                .setLayout(Layout.Builder().setRoot(fallback).build())
+                .build(),
+        )
+        val tile = TileBuilders.Tile.Builder()
+            .setResourcesVersion(resourcesVersion(snapshot, now))
+            .setFreshnessIntervalMillis(60_000)
+            .setTileTimeline(timeline.build())
             .build()
         completer.set(tile)
         "tileRequest"
@@ -84,21 +106,39 @@ class GlucoseTileService : TileService() {
     ): ListenableFuture<ResourceBuilders.Resources> = CallbackToFutureAdapter.getFuture { completer ->
         val snapshot = runBlocking { GlucoseSnapshot.read(this@GlucoseTileService) }
         val builder = ResourceBuilders.Resources.Builder()
-            .setVersion(resourcesVersion(snapshot))
+            // Answer for the version that was asked for: the one derived here could already
+            // differ (a reading landed or went stale between the two requests).
+            .setVersion(requestParams.version)
         chartBitmap(snapshot)?.let { bmp ->
             builder.addIdToImageMapping(CHART_ID, inlineImage(bmp))
         }
+        // Both arrows always: the live and the stale entry of one tile share this resource set.
         builder.addIdToImageMapping(ARROW_ID, inlineImage(arrowBitmap(snapshot)))
+        builder.addIdToImageMapping(
+            ARROW_STALE_ID,
+            inlineImage(ArrowBitmap.forReading(ARROW_PX, null, DarkGlucoseColors.stale.toArgb())),
+        )
         completer.set(builder.build())
         "tileResources"
     }
 
-    /** Resources change whenever a new reading lands — key the version to its timestamp. */
-    private fun resourcesVersion(snapshot: GlucoseSnapshot.Snapshot): String =
-        (snapshot.reading?.epochMillis ?: 0L).toString()
+    /**
+     * Resources change whenever a new reading lands, and when it turns stale (the arrow becomes
+     * the grey dot) — key the version to the reading's timestamp and its usability.
+     */
+    private fun resourcesVersion(snapshot: GlucoseSnapshot.Snapshot, now: Long): String =
+        "${snapshot.reading?.epochMillis ?: 0L}-${snapshot.isUsable(now)}"
 
-    private fun layout(snapshot: GlucoseSnapshot.Snapshot): LayoutElementBuilders.LayoutElement {
-        val now = System.currentTimeMillis()
+    /**
+     * The tile as it reads at [now] — the stale rendering when [now] is past the reading's window.
+     * [shownLater]: the system shows this layout from [now] on, for as long as nothing refreshes
+     * the tile, so its age line can only state a lower bound.
+     */
+    private fun layout(
+        snapshot: GlucoseSnapshot.Snapshot,
+        now: Long,
+        shownLater: Boolean = false,
+    ): LayoutElementBuilders.LayoutElement {
         val valueColor = stateColorArgb(snapshot, now)
         val secondary = AColor.argb(255, 190, 201, 199)
 
@@ -147,7 +187,7 @@ class GlucoseTileService : TileService() {
                     .addContent(LayoutElementBuilders.Spacer.Builder().setWidth(dp(5f)).build())
                     .addContent(
                         Image.Builder()
-                            .setResourceId(ARROW_ID)
+                            .setResourceId(if (snapshot.isUsable(now)) ARROW_ID else ARROW_STALE_ID)
                             .setWidth(dp(ARROW_DP))
                             .setHeight(dp(ARROW_DP))
                             .build(),
@@ -156,7 +196,7 @@ class GlucoseTileService : TileService() {
             )
             .addContent(
                 Text.Builder()
-                    .setText(subtitle(snapshot, now))
+                    .setText(subtitle(snapshot, now, shownLater))
                     .setFontStyle(
                         FontStyle.Builder()
                             .setSize(androidx.wear.protolayout.DimensionBuilders.sp(12f))
@@ -187,9 +227,10 @@ class GlucoseTileService : TileService() {
             .build()
     }
 
-    private fun subtitle(snapshot: GlucoseSnapshot.Snapshot, now: Long): String {
+    private fun subtitle(snapshot: GlucoseSnapshot.Snapshot, now: Long, shownLater: Boolean): String {
         val r = snapshot.reading ?: return "Waiting for data"
-        return "${snapshot.unit.label} · ${ageText(r.ageMillis(now))}"
+        val age = ageText(r.ageMillis(now))
+        return "${snapshot.unit.label} · ${if (shownLater) "over $age" else age}"
     }
 
     /** Cheap layout-side predicate matching lineGraph's null condition (≥2 points in window). */
@@ -257,6 +298,7 @@ class GlucoseTileService : TileService() {
     private companion object {
         const val CHART_ID = "chart"
         const val ARROW_ID = "arrow"
+        const val ARROW_STALE_ID = "arrow_stale"
         const val ARROW_PX = 52
         const val ARROW_DP = 24f
         const val CHART_WINDOW_MS = 3 * 60 * 60 * 1000L

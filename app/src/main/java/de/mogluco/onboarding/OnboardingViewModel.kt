@@ -47,10 +47,11 @@ class OnboardingViewModel(
     // Live readings, so a takeover that reports a transient failure but actually starts streaming
     // can be recognised as success. Defaults to empty (e.g. previews).
     private val latestReadings: Flow<GlucoseReading?> = emptyFlow(),
-    // Whether the engine now has an active sensor. A take-over/rescan REGISTERS the sensor
-    // immediately even when the NFC step reports a transient error — that's the fast success signal,
-    // so we don't have to block on the (much slower) first reading. Defaults to false (e.g. previews).
-    private val sensorActive: () -> Boolean = { false },
+    // The serials the engine has active right now. A take-over can REGISTER the sensor even when
+    // the NFC step reports a transient error — a serial that wasn't there before the scan is the
+    // fast success signal, so we don't have to block on the (much slower) first reading. Defaults
+    // to none (e.g. previews).
+    private val activeSensors: () -> Set<String> = { emptySet() },
     // Reflect the just-registered sensor in the home UI immediately (a "connecting" state), so it
     // doesn't look empty while the BLE handshake completes. Defaults to no-op (e.g. previews).
     private val onActivated: () -> Unit = {},
@@ -73,6 +74,7 @@ class OnboardingViewModel(
         if (_state.value.step != OnboardingStep.Scan) return
         _state.update { it.copy(step = OnboardingStep.Activating) }
         viewModelScope.launch {
+            val activeBefore = activeSensors()
             when (val result = activator.activate(tag)) {
                 is ActivationResult.WarmingUp -> {
                     onActivated()
@@ -85,13 +87,17 @@ class OnboardingViewModel(
                     _state.update { it.copy(step = OnboardingStep.Done) }
                 }
                 is ActivationResult.Failed ->
-                    // A Libre 3 take-over/rescan frequently reports a transient NFC failure at the
-                    // handshake instant while the engine still REGISTERS the sensor (BLE then streams
-                    // a moment later, often after a few handshake retries that can take a minute+).
-                    // Success = a sensor is now active (immediate — no need to hold the phone or wait
-                    // on the first reading), falling back to a short reading-wait if nothing
-                    // registered. Definitive failures (terminated / ended / not a Libre 3) fail at once.
-                    if (result.transient && (sensorActive() || awaitFreshReading())) {
+                    // A Libre 3 take-over can report a transient NFC failure at the handshake
+                    // instant while the engine still REGISTERS the sensor (BLE then streams a moment
+                    // later, often after a few handshake retries that can take a minute+).
+                    // Success = the engine now has a sensor it did not have before the scan
+                    // (immediate — no need to hold the phone or wait on the first reading); with no
+                    // sensor active before, a short reading-wait as a fallback. Not merely "some
+                    // sensor is active" or "a reading arrived": while the previous sensor is still
+                    // streaming, both are true after a scan of the NEW one failed, and the app
+                    // would report a sensor as set up that it never registered. Definitive failures
+                    // (terminated / ended / not a Libre 3) fail at once.
+                    if (result.transient && registeredSince(activeBefore, result.registeredSerial)) {
                         onActivated()
                         _state.update { it.copy(step = OnboardingStep.Done) }
                     } else {
@@ -102,9 +108,21 @@ class OnboardingViewModel(
     }
 
     /**
+     * Whether the scan left the engine with its sensor: the one the engine says it registered
+     * ([registeredSerial] — also a rescan of the sensor already in use, e.g. to take it back from a
+     * watch), or one it did not have in [activeBefore].
+     */
+    private suspend fun registeredSince(activeBefore: Set<String>, registeredSerial: String?): Boolean {
+        val active = activeSensors()
+        if (registeredSerial != null && registeredSerial in active) return true
+        if ((active - activeBefore).isNotEmpty()) return true
+        return activeBefore.isEmpty() && awaitFreshReading()
+    }
+
+    /**
      * Fallback for when no sensor registered yet: wait briefly for a non-stale reading timestamped
      * around now. A reading already present matches immediately; otherwise a short window is enough,
-     * since a real take-over is caught by [sensorActive] instantly and doesn't reach here.
+     * since a real take-over is caught by [registeredSince] instantly and doesn't reach here.
      */
     private suspend fun awaitFreshReading(timeoutMs: Long = 20_000L): Boolean {
         val since = System.currentTimeMillis()
@@ -122,5 +140,19 @@ class OnboardingViewModel(
 
     fun retry() {
         _state.update { OnboardingUiState(step = OnboardingStep.Scan) }
+    }
+
+    /**
+     * Start the flow over, for when the screen is opened again: this view model outlives the
+     * screen, so a finished (or failed) earlier run would otherwise still show its last step. A
+     * run that is still under way is left alone — never reset an activation in mid-handshake.
+     */
+    fun restart() {
+        _state.update {
+            when (it.step) {
+                OnboardingStep.WarmingUp, OnboardingStep.Done, OnboardingStep.Error -> OnboardingUiState()
+                else -> it
+            }
+        }
     }
 }

@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -62,11 +63,13 @@ import de.mogluco.ui.util.startOfDay
 import de.mogluco.data.GlucoseReading
 import de.mogluco.ui.home.AddEventFab
 import de.mogluco.ui.home.BottomListMode
+import de.mogluco.ui.home.EnabledCategoriesSaver
 import de.mogluco.ui.home.EventLegend
 import de.mogluco.ui.home.EventSheetTarget
 import de.mogluco.ui.home.EventSheets
 import de.mogluco.ui.home.GlucoseChart
 import de.mogluco.ui.home.HomeViewModel
+import de.mogluco.ui.home.ReadingDetailSaver
 import de.mogluco.ui.home.ReadingDetailSheet
 import de.mogluco.ui.home.ReadingEventList
 import java.text.SimpleDateFormat
@@ -93,11 +96,19 @@ fun DayDetailScreen(viewModel: HomeViewModel, dayStartMillis: Long, onBack: () -
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     // View state shared across days, so swiping keeps the legend filters / list mode / maximize.
-    var enabledCategories by remember { mutableStateOf(EventCategory.entries.toSet()) }
-    var listMode by remember { mutableStateOf(BottomListMode.EVENTS) }
-    var maximized by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<EventSheetTarget?>(null) }
-    var readingDetail by remember { mutableStateOf<GlucoseReading?>(null) }
+    // All saveable, with Home's savers: a plain remember reset the view on rotation and closed an
+    // open event sheet mid-entry, discarding what was typed.
+    var enabledCategories by rememberSaveable(stateSaver = EnabledCategoriesSaver) {
+        mutableStateOf(EventCategory.entries.toSet())
+    }
+    var listMode by rememberSaveable { mutableStateOf(BottomListMode.EVENTS) }
+    var maximized by rememberSaveable { mutableStateOf(false) }
+    var editing by rememberSaveable(stateSaver = EventSheetTarget.Saver) {
+        mutableStateOf<EventSheetTarget?>(null)
+    }
+    var readingDetail by rememberSaveable(stateSaver = ReadingDetailSaver) {
+        mutableStateOf<GlucoseReading?>(null)
+    }
 
     val displayTypes = remember(state.enabledLogKinds) { viewModel.displayTypes(state.enabledLogKinds) }
     val legendCategories = remember(state.enabledCategories) {
@@ -109,7 +120,10 @@ fun DayDetailScreen(viewModel: HomeViewModel, dayStartMillis: Long, onBack: () -
     // day if it lies in the future); earlier pages step one CALENDAR day back each — fixed-24h
     // millis arithmetic pointed at hour-shifted "midnights" (wrong dates) past a DST transition.
     val anchorDay = remember(dayStartMillis) { startOfDay(dayStartMillis) }
-    val maxDay = remember(anchorDay) { maxOf(startOfDay(System.currentTimeMillis()), anchorDay) }
+    // Saved with the pager's page index, which only means something relative to it: recomputed
+    // from "today" after the activity was recreated on a later date, the restored index pointed
+    // one day on — another day's data, and "+" logging to that day.
+    val maxDay = rememberSaveable(anchorDay) { maxOf(startOfDay(System.currentTimeMillis()), anchorDay) }
     val pageCount = HISTORY_DAYS + 1
     fun dayForPage(page: Int): Long = addDays(maxDay, -(pageCount - 1 - page))
     val initialPage = remember(anchorDay, maxDay) {
@@ -171,6 +185,8 @@ fun DayDetailScreen(viewModel: HomeViewModel, dayStartMillis: Long, onBack: () -
         onLog = { type, value, at, note -> viewModel.logEvent(type, value, at, note) },
         onUpdate = { original, edited -> viewModel.updateEvent(original, edited) },
         onDelete = { viewModel.deleteEvent(it) },
+        // "+" on a past day's page logs to that day, not to today.
+        newEventDay = currentDay,
     )
 
     readingDetail?.let { ReadingDetailSheet(it, state.unit, System.currentTimeMillis()) { readingDetail = null } }
@@ -293,7 +309,10 @@ private fun DayContent(
                 windowEnd = dayEnd,
                 onReadingClick = onReadingClick,
                 onEventClick = onEventClick,
+                readingDisplay = state.readingDisplay,
                 modifier = Modifier.fillMaxSize().padding(12.dp),
+                // As on Home: let the last rows scroll clear of the speed-dial FAB.
+                bottomPadding = 88,
                 maximized = maximized,
                 onToggleMaximize = onToggleMaximize,
             )

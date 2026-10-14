@@ -194,7 +194,7 @@ void logmenupos() {
 #else
 #define logmenupos() 
 #endif
-extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors() ; //a copy: the list itself is shared between threads (glucose.cpp)
 static bool  inmenu(float x,float y) ;
 
  const float     JCurve::getsetlen(NVGcontext* avg,float x, float  y,const char * set,const char *setend,bounds_t &bounds) {
@@ -331,13 +331,14 @@ static bool dohealth(int sensorindex) {
     static int thesensor=sensorindex;
     if(!settings->data()->healthConnect)
         return false;
-    if(usedsensors.size()==1)  {
+    const std::vector<int> used=getusedsensors();
+    if(used.size()==1)  {
         return true;
     }
     if(sensorindex==thesensor)
         return true;
-    auto en=usedsensors.end();
-    if(std::find(usedsensors.begin(),en,thesensor)==en) {
+    auto en=used.end();
+    if(std::find(used.begin(),en,thesensor)==en) {
         thesensor=sensorindex;
         return true;
     }
@@ -1409,7 +1410,7 @@ void     processglucosevalue(int sendindex,int newstart) {
                  const time_t nutime=time(nullptr);
                  const int dif=nutime-tim;
                  if(dif<maxbluetoothage) {
-                     if(!usedsensors.size())
+                     if(!getusedsensors().size())
                          setusedsensors(nutime);
                     int32_t mgdL;
                     uint32_t mgL;
@@ -1527,15 +1528,16 @@ int hourmin(const time_t tim,char buf[8]) {
    }
 void setnowmenu(time_t nu) {
     int timelen=hourmin(nu,hourminstr);
-    const int ulen=usedsensors.size();
+    const std::vector<int> used=getusedsensors();
+    const int ulen=used.size();
 
     if(ulen>0) {
         
         for(int i=0;i<ulen;) {
-            const auto *sens=sensors->getSensorData(usedsensors[i++]);
+            const auto *sens=sensors->getSensorData(used[i++]);
             if(const auto *lastin=sens->lastValidStream()) {
                 for(;i<ulen;i++) {
-                    const auto *nextsens=sensors->getSensorData(usedsensors[i]);
+                    const auto *nextsens=sensors->getSensorData(used[i]);
                     if(const auto *lastsen=nextsens->lastValidStream();lastsen&&(lastsen->t>lastin->t)) {
                         lastin=lastsen;
                         sens=nextsens;

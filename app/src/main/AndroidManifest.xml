@@ -45,9 +45,12 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Mogluco">
+        <!-- singleTop: a notification tap resumes the running instance instead of stacking
+             another copy (each with its own view models) on top of it. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="@string/app_name"
             android:theme="@style/Theme.Mogluco">
             <intent-filter>
@@ -121,6 +124,11 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Wakes the signal-loss check at its deadline (AlarmManager), so it also fires in Doze. -->
+        <receiver
+            android:name=".notification.SignalLossReceiver"
+            android:exported="false" />
 
         <!-- Handles the signal-loss notification's Dismiss / Reclaim-sensor action buttons. -->
         <receiver

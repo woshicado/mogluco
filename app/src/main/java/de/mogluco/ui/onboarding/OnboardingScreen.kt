@@ -101,20 +101,14 @@ fun OnboardingScreen(viewModel: OnboardingViewModel, onDone: () -> Unit) {
 @Composable
 private fun PermissionsStep(onGranted: () -> Unit) {
     // Bluetooth (pre-S: location, which gated BLE scanning) is how readings arrive at all, so
-    // those grants are required to proceed. POST_NOTIFICATIONS is asked alongside but stays
-    // optional — alarms and readings work without it, the user just sees fewer notifications.
+    // those grants are required to proceed. Notifications are not asked for here: that is the
+    // first-open question's (BackgroundAccessDialog) and the Notifications settings', and a
+    // "Don't allow" there must not come back with every new sensor.
     val required = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
             listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-    }
-    val requested = remember {
-        required + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            listOf(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            emptyList()
         }
     }
     val activity = LocalContext.current as Activity
@@ -178,7 +172,7 @@ private fun PermissionsStep(onGranted: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Button(onClick = { launcher.launch(requested.toTypedArray()) }) {
+            Button(onClick = { launcher.launch(required.toTypedArray()) }) {
                 Text(if (denied) "Try again" else "Grant permissions")
             }
             if (permanentlyDenied) {
@@ -280,8 +274,10 @@ private fun WarmingUpStep(warmupEndMillis: Long?, onContinue: () -> Unit) {
         icon = { Icon(Icons.Filled.CheckCircle, null, tint = MoglucoTheme.glucose.inRange, modifier = Modifier.size(72.dp)) },
         title = "Sensor activated",
         body = if (remaining > 0) {
+            // (No promise of a notification: nothing announces the first reading — it simply
+            // shows up on Home and in the readout notification.)
             "Warming up — your first reading will appear in about $remaining min. You can close " +
-                "this; you'll be notified when it's ready."
+                "this; readings start by themselves once the sensor is ready."
         } else {
             "Warm-up complete. Readings should appear shortly."
         },

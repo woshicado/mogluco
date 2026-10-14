@@ -23,6 +23,13 @@
 
 ---
 
+> [!WARNING]
+> **Mogluco is not a medical device.** It is an independent, experimental app, not approved by any regulator and not affiliated with Abbott. Do not make treatment decisions based on it alone.
+>
+> - **Readings can be wrong, late or missing.** Glucose sensors are not always accurate. When a reading disagrees with how you feel, use a blood-glucose fingerstick.
+> - **Alarms can fail.** If the phone restricts Mogluco in the background, blocks its notifications, has Bluetooth off, or is out of the sensor's range, an alarm may not reach you. Do not rely on Mogluco as your only warning of a low.
+> - **No warranty.** Mogluco is provided as is, without any warranty (see the [GPLv3](LICENSE.txt)), and may contain bugs. You use it at your own risk.
+
 ## What is Mogluco?
 
 Mogluco reads glucose straight from your Libre 3 / 3+ sensor over Bluetooth and shows it in a clean, modern interface:
@@ -132,8 +139,3 @@ Thanks to **J. Kaltes** for providing [Juggluco](https://www.juggluco.nl), which
 
 Mogluco is a fork and is distributed under the **GNU General Public License v3.0**, the same licence as Juggluco — see [`LICENSE.txt`](LICENSE.txt). It is an independent, non-commercial project and is **not affiliated with or endorsed by Abbott or Juggluco**.
 
-## ⚠️ Safety
-
-Glucose sensors are not always accurate. **When a reading disagrees with how you feel, use a blood-glucose fingerstick.**
-Mogluco is a data viewer, not a medical device.
-Do not use it to make treatment decisions on its own.

@@ -69,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -96,9 +97,10 @@ import java.util.Calendar
 import java.util.Locale
 
 /**
- * Month calendar. Today, the active sensor's activation day, and its expiry day are
- * highlighted; tapping a day shows that day's readings + events inline (with Home's
- * interactions). The header always reflects the sensor that was active on the selected day
+ * Month calendar. Today and every known sensor's activation day (green ring) and end day (red
+ * ring) are highlighted — a day on which one sensor ended and the next started shows both, as a
+ * ring that is half red, half green. Tapping a day shows that day's readings + events inline
+ * (with Home's interactions). The header always reflects the sensor that was active on the selected day
  * (or says there was none, without shifting the layout). The range-select toggle turns days
  * into a start→end selection and reveals a floating export button.
  */
@@ -111,12 +113,18 @@ fun CalendarScreen(viewModel: HomeViewModel, onOpenDay: (Long) -> Unit, modifier
     // back to today, losing the month/day the user had navigated to.
     var monthAnchor by rememberSaveable { mutableStateOf(startOfMonth(System.currentTimeMillis())) }
     var selectedDay by rememberSaveable { mutableStateOf(startOfDay(System.currentTimeMillis())) }
-    var rangeMode by remember { mutableStateOf(false) }
-    var rangeStart by remember { mutableStateOf<Long?>(null) }
-    var rangeEnd by remember { mutableStateOf<Long?>(null) }
-    var showExport by remember { mutableStateOf(false) }
+    // The range selection and its export sheet are saveable too: rotating while the system file
+    // picker was open dropped the sheet, so the picked file's result was never delivered and an
+    // empty file was left behind without a message.
+    var rangeMode by rememberSaveable { mutableStateOf(false) }
+    var rangeStart by rememberSaveable { mutableStateOf<Long?>(null) }
+    var rangeEnd by rememberSaveable { mutableStateOf<Long?>(null) }
+    var showExport by rememberSaveable { mutableStateOf(false) }
     var showMonthPicker by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<EventSheetTarget?>(null) }
+    // Survives configuration changes like on Home, so a rotation mid-entry keeps the sheet open.
+    var editing by rememberSaveable(stateSaver = EventSheetTarget.Saver) {
+        mutableStateOf<EventSheetTarget?>(null)
+    }
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val selectedSensor = remember(selectedDay, state.sensor, state.sensorHistory) {
@@ -361,13 +369,13 @@ fun CalendarScreen(viewModel: HomeViewModel, onOpenDay: (Long) -> Unit, modifier
             // Half-open [lo, midnight after the end day): DST-safe, and −1 stops a reading at
             // exactly the next midnight from leaking in (the export filter is end-inclusive).
             val hi = nextLocalMidnight(maxOf(s, e)) - 1
+            // Not state.history / state.events: the export reads the repositories itself when it
+            // writes, and takes the unfiltered log — state.events drops the kinds turned off in
+            // Settings → Event logging (a display filter), which must not remove them from an export.
             ExportSheet(
-                points = state.history,
-                events = state.events,
-                unit = state.unit,
+                loadData = viewModel::exportData,
                 fixedWindow = lo..hi,
                 allowFullBackup = false,
-                serial = state.sensor?.id ?: "",
                 onDismiss = { showExport = false },
                 title = "Export selected range",
             )
@@ -573,6 +581,20 @@ private fun DayCell(
                                 isToday -> Modifier.background(MaterialTheme.colorScheme.primary)
                                 isSelected -> Modifier.background(MaterialTheme.colorScheme.primaryContainer)
                                 inRange -> Modifier.background(MaterialTheme.colorScheme.secondaryContainer)
+                                // A replacement day: the old sensor's end and the new one's
+                                // start. Both markers show, in reading order — the end (red) on
+                                // the left half of the ring, the start (green) on the right.
+                                // With only the green ring, a past sensor's end was rarely marked.
+                                isActivation && isExpiry -> Modifier.border(
+                                    2.dp,
+                                    Brush.horizontalGradient(
+                                        0f to MaterialTheme.colorScheme.error,
+                                        0.5f to MaterialTheme.colorScheme.error,
+                                        0.5f to ActivationRing,
+                                        1f to ActivationRing,
+                                    ),
+                                    CircleShape,
+                                )
                                 isActivation -> Modifier.border(2.dp, ActivationRing, CircleShape)
                                 isExpiry -> Modifier.border(2.dp, MaterialTheme.colorScheme.error, CircleShape)
                                 else -> Modifier
@@ -624,18 +646,33 @@ private val MARKER_ORDER = listOf(
 /**
  * The current sensor merged into the stored sensor history (the current one wins for its id: it
  * carries the live error state), oldest activation first.
+ *
+ * Each sensor's life is bounded by what the store knows: a sensor followed by a later one ended at
+ * its last stored reading ([SensorInfo.endMillis]; its nominal expiry when the store has none) and
+ * never after the next sensor's activation — a sensor that failed or was replaced early doesn't
+ * claim the days after it. The current sensor and the newest stored one (possibly still worn, so
+ * its last reading is no end) keep their nominal life.
  */
 internal fun knownSensors(current: SensorInfo?, history: List<SensorInfo>): List<SensorInfo> {
     val others = history.filter { it.id != current?.id }
-    return (others + listOfNotNull(current)).sortedBy { it.activationMillis }
+    val sorted = (others + listOfNotNull(current)).sortedBy { it.activationMillis }
+    return sorted.mapIndexed { i, sensor ->
+        val next = sorted.getOrNull(i + 1)
+        if (next == null || sensor.id == current?.id) {
+            sensor.copy(endMillis = null)
+        } else {
+            sensor.copy(endMillis = minOf(sensor.expiryMillis(), next.activationMillis))
+        }
+    }
 }
 
 /**
  * The sensor that was active on [dayStartMillis]. Looks through every stored sensor ([history],
- * plus the [current] one) for those whose life — activation day through last expiry day — covers
- * the day, and picks the most recently activated (a new sensor started before the old one expired
- * takes over from its activation day). Falls back to the current sensor for days after its expiry
- * while it is still worn, as before. Null when no known sensor covered the day.
+ * plus the [current] one) for those whose life — activation day through last expiry day, bounded
+ * as in [knownSensors] — covers the day, and picks the most recently activated (a new sensor
+ * started before the old one expired takes over from its activation day). Falls back to the
+ * current sensor for days after its expiry while it is still worn, as before. Null when no known
+ * sensor covered the day.
  */
 internal fun sensorOnDay(current: SensorInfo?, history: List<SensorInfo>, dayStartMillis: Long): SensorInfo? {
     val covering = knownSensors(current, history).lastOrNull { sensorDayNumber(it, dayStartMillis) != null }

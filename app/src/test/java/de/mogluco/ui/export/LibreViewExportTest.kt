@@ -105,7 +105,8 @@ class LibreViewExportTest {
         val rows = lines.drop(2)
         assertEquals(
             listOf(
-                "FreeStyle Libre 3,$serial,19-08-2026 02:10,0,103,,,,,,,,,,,,,,,,",
+                // The sensor's reading (raw 100), not the smoothed trace (103.4).
+                "FreeStyle Libre 3,$serial,19-08-2026 02:10,0,100,,,,,,,,,,,,,,,,",
                 "FreeStyle Libre 3,$serial,19-08-2026 07:00,2,,,,,,,,,,,95,,,,,,",
                 "FreeStyle Libre 3,$serial,19-08-2026 02:15,4,,,,\"1,5\",,,,,,,,,,,,,",
                 "FreeStyle Libre 3,$serial,19-08-2026 06:49,4,,,,,,,,,\"11,0\",,,,,,,,",

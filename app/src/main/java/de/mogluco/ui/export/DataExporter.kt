@@ -19,11 +19,17 @@
 package de.mogluco.ui.export
 
 import de.mogluco.data.EventCategory
+import de.mogluco.data.EventRepository
 import de.mogluco.data.isSlowInsulinLabel
 import de.mogluco.data.unit
 import de.mogluco.data.GlucosePoint
+import de.mogluco.data.GlucoseRepository
 import de.mogluco.data.GlucoseUnit
 import de.mogluco.data.LoggedEvent
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
@@ -59,6 +65,52 @@ data class Backup(
     val events: List<LoggedEvent>,
     val glucose: List<GlucosePoint>,
 )
+
+/**
+ * What an export writes, as the repositories hold it at write time: the readings and events, the
+ * unit they are written in and the serial of the sensor in use ("" = none).
+ */
+class ExportData(
+    val points: List<GlucosePoint>,
+    val events: List<LoggedEvent>,
+    val unit: GlucoseUnit,
+    val serial: String,
+)
+
+/**
+ * Reads what an export writes straight from the repositories, at the moment the file is written
+ * — not from a screen's collected state. A view model created while the file picker was open
+ * (process death, "Don't keep activities") still holds its initial state when the picked file
+ * comes back: empty lists, the default unit. The export then wrote a file without data — or one
+ * in the wrong unit — and reported success.
+ *
+ * @return null while the stored readings are not loaded yet: the caller writes nothing and says
+ * so. A store that really holds no data is not that case — its (empty) lists are returned.
+ */
+suspend fun loadExportData(glucose: GlucoseRepository, events: EventRepository): ExportData? {
+    val (points, logged) = loadedLists(glucose.history, glucose.historyLoaded, events.recent) ?: return null
+    return ExportData(points, logged, glucose.unit.first(), glucose.currentSensor?.id.orEmpty())
+}
+
+/**
+ * [history] and [events] once [historyLoaded] says the stored readings are in — waited for up to
+ * [timeoutMillis] (a process that has only just started is still reading them), null if they
+ * are not by then. A history that already holds something is no proof of that: a live reading
+ * can land before the stored ones do. The events need no such wait: both event repositories
+ * fill their list when they are created.
+ */
+internal suspend fun loadedLists(
+    history: Flow<List<GlucosePoint>>,
+    historyLoaded: Flow<Boolean>,
+    events: Flow<List<LoggedEvent>>,
+    timeoutMillis: Long = HISTORY_LOAD_TIMEOUT_MS,
+): Pair<List<GlucosePoint>, List<LoggedEvent>>? {
+    withTimeoutOrNull(timeoutMillis) { historyLoaded.firstOrNull { it } } ?: return null
+    return history.first() to events.first()
+}
+
+/** How long an export waits for the stored history before it gives up without writing. */
+private const val HISTORY_LOAD_TIMEOUT_MS = 15_000L
 
 /**
  * Writes glucose readings and logged events. Plain Kotlin over in-memory data, so it works
@@ -174,6 +226,10 @@ object DataExporter {
      * type-4/5 row, so an event's free-text note is emitted as a companion type-6 row — exactly
      * how a note logged in the official app appears.
      *
+     * The glucose value is the sensor's reading ([GlucosePoint.rawMgdl]), never the app's
+     * smoothed trace: that one lags and changes with a display setting, and this file stands in
+     * for the site's download.
+     *
      * @param serial the LibreView device identifier of this install — the value the Seriennummer
      *   column carries for phone-app uploads in a real export (not the sensor's serial).
      */
@@ -211,7 +267,7 @@ object DataExporter {
         // A real export is written in ascending Record Type blocks, each time-sorted. Collect the
         // note rows (own note events + free-text companions of typed rows) to sort them together.
         pts.forEach { p ->
-            row(p.epochMillis, 0) { it[LV_HISTORIC] = p.calibratedMgdl.roundToInt().toString() }
+            row(p.epochMillis, 0) { it[LV_HISTORIC] = p.rawMgdl.roundToInt().toString() }
         }
         val notes = mutableListOf<Pair<Long, String>>()
         fun noteFor(e: LoggedEvent) {

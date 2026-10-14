@@ -111,6 +111,13 @@ public final class Libre3Activation {
             return new Result(Outcome.ERROR, null, 0L);
         }
         Log.i(LOG_ID, "activated sensor " + name);
+        // Read while the pointer is certainly ours — the hand-off below gives it away or frees it.
+        long startMsec = 0L;
+        try {
+            startMsec = Natives.getSensorStartmsec(streamptr);
+        } catch (Throwable ignore) {
+            // best-effort; fall back to now + warm-up below
+        }
         // resetDeviceOrFree FREES the pointer (and does nothing) if the BLE manager isn't up,
         // so make sure it's started before the hand-off — otherwise we'd report ACTIVE for a
         // sensor that never gets a BLE connection.
@@ -118,20 +125,22 @@ public final class Libre3Activation {
             Log.i(LOG_ID, "BLE manager not started yet; starting before hand-off");
             Sensors.start();
         }
-        // Hands off to BLE (starts streaming). Returns false if the BLE manager still isn't up —
-        // in which case it FREES the pointer, so we must not report ACTIVE for a sensor that will
-        // never stream.
-        if (!SensorBluetooth.resetDeviceOrFree(streamptr, name)) {
-            Log.e(LOG_ID, "resetDeviceOrFree failed (BLE unavailable); not streaming");
+        // Still down when this device does not own the sensor's BLE link (usebluetooth off: a
+        // watch has it). The hand-off then only frees the pointer.
+        final boolean bleManagerUp = SensorBluetooth.blueone != null;
+        // Hands off to BLE (starts streaming). The return value is NOT "handed off": as in upstream
+        // (ScanNfcV kept it as `askpermission`) it is true only when a scan is needed and the scan
+        // permission is missing; false is the normal result — and also what a missing BLE manager
+        // returns. Reading it as success/failure reported every successful activation as ERROR.
+        final boolean needsScanPermission = SensorBluetooth.resetDeviceOrFree(streamptr, name);
+        if (!bleManagerUp) {
+            Log.e(LOG_ID, "resetDeviceOrFree: no BLE manager (BLE unavailable); not streaming");
             return new Result(Outcome.ERROR, name, 0L);
         }
-
-        long startMsec = 0L;
-        try {
-            startMsec = Natives.getSensorStartmsec(streamptr);
-        } catch (Throwable ignore) {
-            // best-effort; fall back to now + warm-up below
+        if (needsScanPermission) {
+            Log.e(LOG_ID, "sensor registered, but scanning for it needs the scan permission");
         }
+
         long warmupEnd =
             (startMsec > 0L) ? (startMsec + WARMUP_MS) : (System.currentTimeMillis() + WARMUP_MS);
         return new Result(Outcome.ACTIVE, name, warmupEnd);

@@ -75,7 +75,8 @@ class MainActivity : ComponentActivity() {
                 .launch(needed.toTypedArray())
         }
         // The keep-alive service holds the process for data + alarms + chip. Started here
-        // (foreground context) and again from BootReceiver after reboots.
+        // (foreground context, so the start is always allowed); BootReceiver (reboot, app update)
+        // and WearApp (any other process start) bring it back without the app being opened.
         WearGlucoseService.start(this)
         // Continuous background sensor scanning wants a Doze exemption — ask once if not granted.
         // Only mark it "asked" if the request actually launched (on some watches the direct intent
@@ -188,5 +189,11 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_DESTINATION = "de.mogluco.wear.DESTINATION"
         const val DEST_GRAPH = "graph"
         const val DEST_HOME = "home"
+
+        // PendingIntent request codes, one per destination: extras are not part of a
+        // PendingIntent's identity, so with a shared code the last one created (FLAG_UPDATE_CURRENT)
+        // decides where the ongoing chip AND the complications open.
+        const val REQUEST_HOME = 0
+        const val REQUEST_GRAPH = 1
     }
 }

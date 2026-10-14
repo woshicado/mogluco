@@ -410,8 +410,12 @@ extern "C" JNIEXPORT jlong JNICALL   fromjava(streamfromSensorptr)(JNIEnv *env, 
     const int len=sens->pollcount();
     for(int i=pos;i<len;i++) {
         const ScanData *item=start+i;
-        if(item->valid()) {
-            for(++i;i<len&&!start[i].valid();i++) 
+        // valid(i), not valid(): the default argument "repairs" a slot without a time from the slot
+        // before it — at index 0 that reads in front of the mapping and writes into the store. A
+        // mirror receiver set up while the sensor was already running has exactly such empty
+        // leading slots.
+        if(item->valid(i)) {
+            for(++i;i<len&&!start[i].valid(i);i++) 
                 ;
             long mgdL;
             if(double calibrated=calibrateONEtest(sens,*item);!isnan(calibrated)) {
@@ -419,6 +423,10 @@ extern "C" JNIEXPORT jlong JNICALL   fromjava(streamfromSensorptr)(JNIEnv *env, 
                 }
              else
                 mgdL=item->getmgdL();
+            // The value has 16 bits in the packed result. A negative one (a manual calibration's
+            // a*x+b can go below zero) would sign-extend into the position field above it, and
+            // the caller would take that for the end of the stream.
+            mgdL=std::clamp<long>(mgdL,0,0xFFFF);
             return ((jlong)item->gettime())|(((jlong)mgdL)<<32|((jlong)i)<<48);
             }
         }
@@ -823,11 +831,7 @@ extern "C" JNIEXPORT jint JNICALL   fromjava(getsensorgen)(JNIEnv *envin, jclass
 //   -1 invalid, 0 ok, 6 sensor error (defective), 7 replace sensor, 8 not ready (warm-up/state),
 //   9 ended. Mirrors the legacy curve status (appcurve.cpp drawsensorstatus): a defective sensor
 //   sets hist->sensorerror right after warm-up when the first reading is out of range.
-extern "C" JNIEXPORT jint JNICALL   fromjava(getSensorState)(JNIEnv *envin, jclass cl,jlong dataptr) {
-    streamdata * const streamptr=reinterpret_cast<streamdata *>(dataptr);
-    if(!dataptr)
-        return -1;
-    const SensorGlucoseData *usedhist=streamptr->hist ;
+static jint sensorstate(const SensorGlucoseData *usedhist) {
     if(!usedhist)
         return -1;
     if(usedhist->hasSensorError((uint32_t)time(nullptr)))
@@ -836,6 +840,59 @@ extern "C" JNIEXPORT jint JNICALL   fromjava(getSensorState)(JNIEnv *envin, jcla
     if(state && state != 4)
         return state > 4 ? 9 : 8;
     return 0;
+    }
+extern "C" JNIEXPORT jint JNICALL   fromjava(getSensorState)(JNIEnv *envin, jclass cl,jlong dataptr) {
+    streamdata * const streamptr=reinterpret_cast<streamdata *>(dataptr);
+    if(!dataptr)
+        return -1;
+    return sensorstate(streamptr->hist);
+    }
+
+// Sensor by (short) serial for natives that only READ it. Unlike getdataptr()/str2sensorptr() this
+// allocates no streamdata and leaves sensorerror alone: the redesign asks for the sensor state on
+// every reading, and going through getdataptr() there leaked one stream object per reading and
+// wiped the very error flag getSensorState reads (so 6/7 could never be reported). The flag is
+// still reset where upstream resets it — when a sensor's GATT callback gets its dataptr.
+// Compiled for WEAROS too: the watch runs the same repository.
+static const SensorGlucoseData *readsensor(JNIEnv *env,jstring jsensor) {
+    if(!sensors||!jsensor)
+        return nullptr;
+    constexpr const  int shortsensorlen=11;
+    char sensor[shortsensorlen+1]{};
+    env->GetStringUTFRegion( jsensor, 0,shortsensorlen, sensor);
+    if(env->ExceptionCheck()) { //shorter than a sensor name
+        env->ExceptionClear();
+        return nullptr;
+        }
+    return sensors->gethistshort(sensor);
+    }
+extern "C" JNIEXPORT jint JNICALL   fromjava(statefromSerial)(JNIEnv *env, jclass cl,jstring jsensor) {
+    return sensorstate(readsensor(env,jsensor));
+    }
+extern "C" JNIEXPORT jlong JNICALL   fromjava(startmsecfromSerial)(JNIEnv *env, jclass cl,jstring jsensor) {
+    const SensorGlucoseData *sens=readsensor(env,jsensor);
+    if(!sens)
+        return 0LL;
+    return sens->getstarttime()*1000LL;
+    }
+// Official end of the sensor's wear time in epoch ms, for the lifetime (14 or 15 days) of the
+// CURRENT sensor; 0 = the engine does not know, and the caller keeps its own default. That includes
+// a sensor without a recorded wear duration: officialendtime() then assumes 14 days
+// (getweardurationMIN()), which would label a 15-day sensor "/ 14".
+static uint32_t knownofficialend(const SensorGlucoseData *sens) {
+    if(!sens->getstarttime())
+        return 0;
+    const auto *info=sens->getinfo();
+    const int wear=(sens->isLibre2()||sens->isDexcom()||sens->isAccuChek())?info->wearduration:info->wearduration2; //the field getweardurationMIN() reads
+    if(!wear)
+        return 0;
+    return sens->officialendtime();
+    }
+extern "C" JNIEXPORT jlong JNICALL   fromjava(officialendmsecfromSerial)(JNIEnv *env, jclass cl,jstring jsensor) {
+    const SensorGlucoseData *sens=readsensor(env,jsensor);
+    if(!sens)
+        return 0LL;
+    return knownofficialend(sens)*1000LL;
     }
 
 extern "C" JNIEXPORT jbyteArray JNICALL   fromjava(getstreamingAuthenticationData)(JNIEnv *envin, jclass cl,jlong dataptr) {
@@ -1061,7 +1118,9 @@ extern "C" JNIEXPORT jlong JNICALL   fromjava(laststarttime)(JNIEnv *envin, jcla
     return sensors->laststarttime();
     }
 
-extern std::vector<int> usedsensors;
+// The list of used sensors is shared between threads: read a copy (getusedsensors(), glucose.cpp),
+// never the global itself.
+extern std::vector<int> getusedsensors() ;
 extern void setusedsensors() ;
 /*
 extern "C" JNIEXPORT jboolean  JNICALL   fromjava(hasSibionics)(JNIEnv *env, jclass cl) {
@@ -1076,9 +1135,10 @@ extern "C" JNIEXPORT jboolean  JNICALL   fromjava(hasSibionics)(JNIEnv *env, jcl
     }  */
 extern "C" JNIEXPORT jboolean  JNICALL   fromjava(hasNeedScan)(JNIEnv *env, jclass cl) {
     setusedsensors();
-    const int len= usedsensors.size();
+    const std::vector<int> used=getusedsensors();
+    const int len= used.size();
      for(int i=0;i<len;i++) {
-         const int index=usedsensors[i];
+         const int index=used[i];
          if(sensors->needsScan(index))
                 return true;
           }
@@ -1087,11 +1147,12 @@ extern "C" JNIEXPORT jboolean  JNICALL   fromjava(hasNeedScan)(JNIEnv *env, jcla
 #ifndef WEAROS
 extern "C" JNIEXPORT jlongArray JNICALL   fromjava(activeSensorPtrs)(JNIEnv *env, jclass cl) {
     setusedsensors();
-    const int len= usedsensors.size();
+    const std::vector<int> used=getusedsensors();
+    const int len= used.size();
      jlong longar[len]; 
     LOGGER("activeSensorPtrs  len=%d\n",len);
     for(int i=0;i<len;i++) {
-         int index=usedsensors[i];
+         int index=used[i];
          const SensorGlucoseData *sens=sensors->getSensorData(index );
          longar[i]=reinterpret_cast<jlong>(sens);
           }
@@ -1129,6 +1190,39 @@ extern "C" JNIEXPORT jstring JNICALL   fromjava(namefromSensorptr)(JNIEnv *env, 
     return env->NewStringUTF(sens->shortsensorname()->data());
     }
 
+// {activation, official end, last stored reading} of one stored sensor, epoch seconds (0 = unknown),
+// for the calendar's past-sensor display (Engine.storedSensors()). Read straight from the
+// SensorGlucoseData*: unlike getdataptr() it allocates no streamdata and leaves sensorerror and the
+// streaming state alone. Strictly read-only — hence valid(0), which skips the in-place repair of a
+// zero time that ScanData::valid()'s default argument does. History walk clamped as in
+// historyfromSensorptr.
+extern "C" JNIEXPORT jlongArray JNICALL   fromjava(lifefromSensorptr)(JNIEnv *env, jclass cl,jlong sensorptr) {
+    const auto *sens=reinterpret_cast<const SensorGlucoseData*>(sensorptr);
+    const uint32_t start=sens->getstarttime();
+    uint32_t last=0;
+    if(const ScanData *polls=sens->beginpolls()) {
+        for(int i=sens->pollcount()-1;i>=0;--i) {
+            if(polls[i].valid(0)) {
+                last=polls[i].gettime();
+                break;
+                }
+            }
+        }
+    const int firstpos=std::max(sens->getstarthistory(),0);
+    for(int i=std::min(sens->getAllendhistory(),sens->maxpos())-1;i>=firstpos;--i) {
+        const auto *g=sens->getglucose(i);
+        if(g->valid()) {
+            if(g->time>last)
+                last=g->time;
+            break;
+            }
+        }
+    const jlong life[]={start,knownofficialend(sens),last}; // 0 = unknown, as for the current sensor
+    jlongArray lifeAr = env->NewLongArray(3);
+    env->SetLongArrayRegion(lifeAr, 0, 3, life);
+    return lifeAr;
+    }
+
 extern "C" JNIEXPORT jstring JNICALL   fromjava(sensortextfromSensorptr)(JNIEnv *envin, jclass cl,jlong sensorptr) {
     const auto *sens=reinterpret_cast<const SensorGlucoseData*>(sensorptr); 
     return envin->NewStringUTF(getsensortext(sens).data());
@@ -1144,12 +1238,13 @@ extern jclass JNIString;
 #ifdef LIBRE3
 extern "C" JNIEXPORT jobjectArray  JNICALL   fromjava(activeSensors)(JNIEnv *env, jclass cl) {
     setusedsensors();
-    const int len= usedsensors.size();
+    const std::vector<int> used=getusedsensors();
+    const int len= used.size();
     jobjectArray  sensjar = env->NewObjectArray(len,JNIString,nullptr);
     
     LOGGER("activeSensors libre3 len=%d\n",len);
      for(int i=0;i<len;i++) {
-         int index=usedsensors[i];
+         int index=used[i];
          const char *name=sensors->shortsensorname(index)->data();
 //       const char *name=sensors->showsensorname(index); //gives problems in getdataptr
          LOGGER("active: %s\n",name);
@@ -1162,11 +1257,12 @@ extern "C" JNIEXPORT jobjectArray  JNICALL   fromjava(activeSensors)(JNIEnv *env
 extern "C" JNIEXPORT jobjectArray  JNICALL   fromjava(activeSensors)(JNIEnv *env, jclass cl) {
     LOGSTRING("activeSensors oldlibre\n");
     setusedsensors();
-    const int len= usedsensors.size();
+    const std::vector<int> used=getusedsensors();
+    const int len= used.size();
     const char *names[len];
     int uitlen=0;
      for(int i=0;i<len;i++) {
-          int index=usedsensors[i];
+          int index=used[i];
           const SensorGlucoseData *sens=sensors->getSensorData(index );
           if(sens&&!sens->isLibre3())
               names[uitlen++]=sensors->shortsensorname(index)->data();
@@ -1495,10 +1591,10 @@ extern std::vector<int> usedsensors;
 int getlastGen() {
     if(lastgen) return lastgen;
 extern    void setusedsensors() ;
-extern std::vector<int> usedsensors;
+extern std::vector<int> getusedsensors() ;
      setusedsensors() ;
      bool has2=false,has1=false;
-     for(int index:usedsensors) {
+     for(int index:getusedsensors()) {
          auto sens=sensors->getSensorData(index);
          if(sens->getsensorgen()==2) {
              has2=true;

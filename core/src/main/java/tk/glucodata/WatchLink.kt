@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,13 +76,19 @@ object WatchLink {
     // the case where the watch owns the sensor but has not yet sent any mirror data (lastwatchdata
     // still 0), so a silent-and-unreachable watch is still reclaimed.
     @Volatile private var watchOwnedSinceMillis = 0L
+    // When the watch confirmed a hand-over in THIS process (0 after a restart, where the restored
+    // role says nothing about when it was handed over). Lower bound for the auto-reclaim silence clock.
+    @Volatile private var handOverConfirmedMillis = 0L
 @Volatile private var knownNodeIds: Set<String> = emptySet()
 
     /** Watch: the store already held data at process start, so no /askforstart bootstrap ran. */
     @Volatile private var dataAtStart = false
 
-    /** Last network-change-triggered /catchup (elapsed realtime); throttles connectivity churn. */
+    /** Last network-change-triggered /catchup that reached a peer (elapsed realtime); 0 = none yet. */
     @Volatile private var lastNetworkCatchupElapsed = 0L
+
+    /** The one pending network-change catch-up: settling, or deferred to the end of the window. */
+    private var networkCatchupJob: Job? = null
 
     /** False while the app runs on sample data (no engine → no mirror). */
     val isInitialized: Boolean get() = initialized
@@ -164,19 +171,7 @@ object WatchLink {
                         Applic.wakemirrors()
                         // Connectivity came back — pull any readings that arrived on the peer while
                         // we were offline (the mirror stream only resumes from "now" going forward).
-                        // Delayed so the mirror re-handshake above settles first. Throttled: every
-                        // Wi-Fi/cellular/proxy handover lands here, and each catch-up makes the peer
-                        // walk and ship up to a day of history. A real reconnect after a peer drop is
-                        // still covered unthrottled by onNodesChanged and the manual Re-sync.
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        if (lastNetworkCatchupElapsed == 0L ||
-                            now - lastNetworkCatchupElapsed >= NETWORK_CATCHUP_MIN_INTERVAL_MS
-                        ) {
-                            lastNetworkCatchupElapsed = now
-                            Applic.scheduler.schedule(
-                                { runCatching { MessageSender.sendCatchup() } }, 8, TimeUnit.SECONDS,
-                            )
-                        }
+                        scheduleNetworkCatchup()
                     }
 
                     override fun onLost(network: Network) {
@@ -188,6 +183,37 @@ object WatchLink {
                 },
             )
         }.onFailure { Log.stack(LOG_ID, "registerNetworkCallback", it) }
+    }
+
+    /**
+     * Network-change catch-up, at most one per [NETWORK_CATCHUP_MIN_INTERVAL_MS]: every
+     * Wi-Fi/cellular/proxy handover lands in onAvailable, and each catch-up makes the peer walk and
+     * ship up to a day of history. A trigger inside the window is not dropped but deferred to the
+     * window's end — a link that silently dropped and came back within the window (no new node, so
+     * no [onNodesChanged] catch-up either) would otherwise keep its gap until some later
+     * connectivity event. The window only starts once a catch-up actually reached a peer, so an
+     * attempt with nobody reachable doesn't use it up. Delayed first so the mirror re-handshake in
+     * onAvailable settles. A real reconnect after a peer drop is still covered unthrottled by
+     * onNodesChanged and the manual Re-sync.
+     */
+    private fun scheduleNetworkCatchup() {
+        // One pending job, re-armed by every trigger (connectivity callbacks are serialized): the
+        // window is measured in elapsed realtime, which keeps running while the device sleeps, but
+        // delay() only counts while the CPU is up — a later trigger must not wait on a stale timer.
+        networkCatchupJob?.cancel()
+        networkCatchupJob = scope.launch {
+            delay(NETWORK_CATCHUP_SETTLE_MS)
+            while (true) {
+                val last = lastNetworkCatchupElapsed
+                if (last == 0L) break
+                val left = last + NETWORK_CATCHUP_MIN_INTERVAL_MS - android.os.SystemClock.elapsedRealtime()
+                if (left <= 0L) break
+                delay(left)
+            }
+            if (runCatching { MessageSender.sendCatchupResult() }.getOrDefault(false)) {
+                lastNetworkCatchupElapsed = android.os.SystemClock.elapsedRealtime()
+            }
+        }
     }
 
     /** Force a mirror re-handshake (the "Sync/Re-init" button). */
@@ -287,8 +313,24 @@ object WatchLink {
         wearAlarmListener = listener
     }
 
+    /** Phone: the timings last pushed, kept so [resendWearAlarm] can repeat them. */
+    @Volatile private var lastWearAlarm: Triple<Int, Int, Int>? = null
+
     /** Phone: push the watch's alarm timings (repeat/snooze minutes, timeout seconds). */
     fun pushWearAlarm(repeatMin: Int, snoozeMin: Int, timeoutSec: Int) {
+        lastWearAlarm = Triple(repeatMin, snoozeMin, timeoutSec)
+        MessageSender.sendWearAlarm(repeatMin, snoozeMin, timeoutSec)
+    }
+
+    /**
+     * Phone: the watch asked for a catch-up, i.e. it just (re)gained the link from its own point of
+     * view — repeat the alarm timings too. The app pushes them when a watch appears in the node set
+     * and on every change, but that send is fire-and-forget: one lost to a link that looked up but
+     * wasn't would leave the watch on older timings (e.g. a shorter alarm duration than the phone
+     * shows) until the next change. Applying equal values on the watch is a no-op.
+     */
+    internal fun resendWearAlarm() {
+        val (repeatMin, snoozeMin, timeoutSec) = lastWearAlarm ?: return
         MessageSender.sendWearAlarm(repeatMin, snoozeMin, timeoutSec)
     }
 
@@ -381,9 +423,15 @@ object WatchLink {
      * act — whichever takes the lock first flips the state and makes the other a no-op.
      */
     private suspend fun awaitWatchConfirm(nodeId: String, deadline: Long, startMillis: Long) {
-        // Poll fallback: fresh watch data with our BLE off can only come from the watch. This is a
-        // plain suspend fun (no CoroutineScope receiver), so cooperative-cancellation uses the
-        // coroutine context's isActive rather than the CoroutineScope extension.
+        // What this poll proves is weaker than "the watch has the sensor": directsensorwatch is the
+        // phone's own role bit (set by the hand-over itself) and lastwatchdata is the mirror's
+        // up-to-date stamp, which the phone's own sync pass to the watch sets as well — together
+        // "the mirror to that watch worked since the hand-over". The native sBlueWatch ack never
+        // fires (nothing calls Natives.watchBluetooth). Deliberately not tightened to "a reading
+        // newer than startMillis": a watch that needs longer than the window to connect and deliver
+        // its first reading would be reverted mid-connect, with both devices after the sensor.
+        // This is a plain suspend fun (no CoroutineScope receiver), so cooperative-cancellation
+        // uses the coroutine context's isActive rather than the CoroutineScope extension.
         while (coroutineContext.isActive) {
             delay(15_000)
             val st = _transferState.value
@@ -531,7 +579,11 @@ object WatchLink {
                     // instead of leaving the phone's BLE off forever with the `last != 0L` gate unmet.
                     val reading = lastReadingMillis()
                     val last = if (reading != 0L) reading else lastWatchDataMillis(st.nodeId)
-                    val since = if (last != 0L) last else watchOwnedSinceMillis
+                    // The silence clock never starts before the hand-over itself: the phone's last
+                    // reading may predate it by more than the window (that can be why the sensor was
+                    // sent over), and the watch must get the whole window to deliver its first one —
+                    // otherwise a brief drop right after the hand-over reclaims at once.
+                    val since = maxOf(if (last != 0L) last else watchOwnedSinceMillis, handOverConfirmedMillis)
                     val silentFor = System.currentTimeMillis() - since
                     val reachable = _nodes.value.any { it.id == st.nodeId }
                     if (since != 0L && silentFor > silenceMs && !reachable) {
@@ -589,11 +641,44 @@ object WatchLink {
             Log.i(LOG_ID, "reappeared after reclaim — sending bluetooth-off to $needsOff")
             scope.launch {
                 runCatching {
-                    sendReleaseToPeer(needsOff)
-                    prefs?.edit()?.remove(KEY_NEEDS_BT_OFF)?.apply()
+                    // Only forget the marker once the release was really handed to the watch: a
+                    // node can be listed while not actually connected, and a marker dropped after a
+                    // send that went nowhere leaves that watch believing it owns the sensor for good.
+                    if (deliverReleaseToPeer(needsOff)) {
+                        if (prefs?.getString(KEY_NEEDS_BT_OFF, null) == needsOff) clearNeedsBluetoothOff()
+                    } else if (stillNeedsRelease(needsOff)) {
+                        Log.e(LOG_ID, "bluetooth-off to $needsOff not delivered — keeping the marker")
+                    }
                 }.onFailure { Log.stack(LOG_ID, "post-reclaim bluetooth-off", it) }
             }
         }
+    }
+
+    /** True while the persisted marker still orders [nodeId] off and that watch is not the owner. */
+    private fun stillNeedsRelease(nodeId: String): Boolean {
+        if (prefs?.getString(KEY_NEEDS_BT_OFF, null) != nodeId) return false
+        return when (val st = _transferState.value) {
+            is TransferState.WatchHasSensor -> st.nodeId != nodeId
+            is TransferState.AwaitingWatchConfirm -> st.nodeId != nodeId
+            else -> true
+        }
+    }
+
+    /**
+     * [sendReleaseToPeer] for the marker re-send — the same two messages, but awaiting the
+     * Data-Layer sends: true when both the role flip and the bluetooth-off were handed to a
+     * connected watch. Blocking (up to the send timeout each). Sends nothing once a new hand-over
+     * to that watch superseded the marker.
+     */
+    private fun deliverReleaseToPeer(nodeId: String): Boolean {
+        val sender = MessageSender.getMessageSender() ?: return false
+        if (!stillNeedsRelease(nodeId)) return false
+        val netinfo = Natives.getmynetinfo(nodeId, true, -1, true, 0)
+        val flipped = netinfo != null && sender.sendnetinfoResult(nodeId, netinfo)
+        // The first send can block for a while on a flaky link; never order the watch's BLE off
+        // after the user handed the sensor to it in the meantime.
+        if (!stillNeedsRelease(nodeId)) return false
+        return sender.sendbluetoothResult(nodeId, false) && flipped
     }
 
     /** Watch: the phone's /start settings arrived — later process starts skip the bootstrap. */
@@ -627,6 +712,46 @@ object WatchLink {
         }
     }
 
+    /**
+     * Phone, from MessageReceiver right after a watch's /netinfo was applied natively. The native
+     * handshake knows nothing of [transferState]: ANY netinfo in which the watch still claims the
+     * sensor makes the phone's engine yield (usebluetooth off, no stream to that watch) — also a
+     * stale one from a watch that missed the release (built before it processed it, or persisted
+     * across its restart). Left alone, the phone then answers "the watch has the sensor", the watch
+     * re-arms itself, and both devices go for the sensor's single BLE slot. The same flag is turned
+     * off by a reading the watch still mirrored after a take-back.
+     *
+     * So when the flag is off although no watch is (becoming) the owner here — the state
+     * [selfHealBluetoothOff] repairs at start — re-assert the phone's role and order that watch
+     * off again. Never during a transfer or while a watch owns the sensor.
+     */
+    internal fun onPeerNetinfoApplied(nodeId: String) {
+        if (Applic.isWearable || !initialized) return
+        if (runCatching { Natives.getusebluetooth() }.getOrDefault(true)) return
+        synchronized(transferLock) {
+            // Flag first, state second: a hand-over publishes AwaitingWatchConfirm BEFORE it turns
+            // the flag off, and every take-back turns it back on under this lock before changing
+            // the state — so "off" seen here together with a phone-owned state is never a transfer
+            // in progress.
+            val off = runCatching { !Natives.getusebluetooth() }.getOrDefault(false)
+            val st = _transferState.value
+            if (!off || st is TransferState.WatchHasSensor || st is TransferState.AwaitingWatchConfirm) return
+            Log.e(LOG_ID, "netinfo from $nodeId turned usebluetooth off while the phone owns the sensor — re-asserting")
+            runCatching {
+                sendReleaseToPeer(nodeId)
+                // Re-sent on its next reappearance until it was really delivered (onNodesChanged).
+                prefs?.edit()?.putString(KEY_NEEDS_BT_OFF, nodeId)?.apply()
+                if (SensorBluetooth.blueone == null) {
+                    Applic.setbluetooth(true) // BLE manager is down as well: the self-heal sequence
+                } else {
+                    // The manager is up (and possibly connected): only the flag was flipped. Not
+                    // Applic.setbluetooth(true), which would drop and re-open a live connection.
+                    Natives.setusebluetooth(true)
+                }
+            }.onFailure { Log.stack(LOG_ID, "onPeerNetinfoApplied", it) }
+        }
+    }
+
     private fun confirmWatchHasSensor(nodeId: String) {
         synchronized(transferLock) {
             // A stale/late ack must not undo a take-back the phone just performed (which turned the
@@ -642,6 +767,7 @@ object WatchLink {
             Log.i(LOG_ID, "watch $nodeId confirmed sensor ownership")
             clearNeedsBluetoothOff()
             watchOwnedSinceMillis = System.currentTimeMillis()
+            handOverConfirmedMillis = watchOwnedSinceMillis
             _transferState.value = TransferState.WatchHasSensor(nodeId)
             persistWatchNode(nodeId)
             clearPendingTransfer()
@@ -759,8 +885,11 @@ object WatchLink {
     // payload well under the Data-Layer message limit regardless of window.
     const val CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000L
 
-    /** Minimum spacing of connectivity-triggered catch-ups (see registerNetworkCallback). */
+    /** Minimum spacing of connectivity-triggered catch-ups (see [scheduleNetworkCatchup]). */
     private const val NETWORK_CATCHUP_MIN_INTERVAL_MS = 10 * 60_000L
+
+    /** Wait after a connectivity change before asking, so the mirror re-handshake settles first. */
+    private const val NETWORK_CATCHUP_SETTLE_MS = 8_000L
 
     // Cap the catch-up batch so the packed payload (4 + n*12 bytes) stays comfortably under the
     // ~100 KB Data-Layer message limit even at 1-minute resolution over the whole window.

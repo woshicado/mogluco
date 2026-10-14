@@ -54,6 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
@@ -109,7 +110,10 @@ fun SettingsSection(title: String, content: @Composable () -> Unit) {
     }
 }
 
-/** A tappable row that navigates somewhere, with an optional current-value summary. */
+/**
+ * A tappable row that navigates somewhere, with an optional current-value summary. A null
+ * [onClick] makes it a plain, non-interactive row — use [StatusRow] for that.
+ */
 @Composable
 fun NavRow(
     icon: ImageVector?,
@@ -118,10 +122,14 @@ fun NavRow(
     value: String? = null,
     trailingIcon: ImageVector? = Icons.Filled.ChevronRight,
     busy: Boolean = false,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)?,
 ) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp),
+        Modifier
+            .fillMaxWidth()
+            // Without a click the title and subtitle are still read out as one item.
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it.semantics(mergeDescendants = true) {} }
+            .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
@@ -147,6 +155,15 @@ fun NavRow(
             Icon(trailingIcon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/**
+ * An informational row in [NavRow]'s layout: it states something and does nothing — no ripple, no
+ * click action for TalkBack to announce, and no chevron promising somewhere to go.
+ */
+@Composable
+fun StatusRow(icon: ImageVector?, title: String, subtitle: String? = null) {
+    NavRow(icon, title, subtitle = subtitle, trailingIcon = null, onClick = null)
 }
 
 /** A row with a trailing switch. */
@@ -297,6 +314,9 @@ fun <T> ChoiceRow(
                     enabled = enabledOption(opt),
                     onClick = { onSelect(opt) },
                     shape = SegmentedButtonDefaults.itemShape(i, options.size),
+                    // No check mark, as on every segmented control in the app (Home's range
+                    // selector has no room for one): the fill marks the selection.
+                    icon = {},
                 ) { Text(optionLabel(opt)) }
             }
         }

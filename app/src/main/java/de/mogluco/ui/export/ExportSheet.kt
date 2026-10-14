@@ -56,29 +56,23 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import de.mogluco.data.GlucosePoint
-import de.mogluco.data.GlucoseUnit
-import de.mogluco.data.LoggedEvent
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
  * The single export modal used by both Settings and the Calendar range export. Pick a period
- * and a format, then choose where to save; the file is written by [DataExporter] over the
- * supplied data. When [fixedWindow] is non-null (calendar range select) the period chips are
- * hidden and that exact window is exported.
+ * and a format, then choose where to save; the file is written by [DataExporter] over what
+ * [loadData] returns at that moment (see [loadExportData]). When [fixedWindow] is non-null
+ * (calendar range select) the period chips are hidden and that exact window is exported.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ExportSheet(
-    points: List<GlucosePoint>,
-    events: List<LoggedEvent>,
-    unit: GlucoseUnit,
+    loadData: suspend () -> ExportData?,
     onDismiss: () -> Unit,
     fixedWindow: LongRange? = null,
     allowFullBackup: Boolean = true,
-    serial: String = "",
     settings: Map<String, String> = emptyMap(),
     title: String = "Export data",
 ) {
@@ -86,9 +80,11 @@ fun ExportSheet(
     val formats = ExportFormat.entries.filter { allowFullBackup || it != ExportFormat.DATABASE }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var range by remember { mutableStateOf(ExportRange.ALL) }
     // Saveable: the activity is recreated if the phone rotates while the SAF picker is open, and
-    // a plain remember dropped the chosen format — the returned URI was then silently ignored.
+    // a plain remember dropped the chosen format — the returned URI was then silently ignored —
+    // and reset the chosen period, so the file would have covered the wrong span. (The callers
+    // keep the sheet itself open across the recreation the same way.)
+    var range by rememberSaveable { mutableStateOf(ExportRange.ALL) }
     var pendingFormat by rememberSaveable { mutableStateOf<ExportFormat?>(null) }
     var exporting by remember { mutableStateOf(false) }
 
@@ -120,19 +116,29 @@ fun ExportSheet(
             // right here in the ActivityResult callback blocked Main and could ANR.
             // NonCancellable: the scope dies on rotation mid-write — finish the file rather than
             // leave a truncated export behind (the completion toast may be skipped, that's fine).
-            val ok = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+            // null: nothing was written, because the stored history is not loaded yet.
+            val ok: Boolean? = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
                 runCatching {
+                    // Read now, not from the composition that received the picker's result: after
+                    // the activity was destroyed with the picker open that is a new view model's
+                    // empty initial state, and the file was written without data.
+                    val data = loadData() ?: return@withContext null
                     context.contentResolver.openOutputStream(uri)?.use { os ->
                         DataExporter.export(
-                            os, fmt, points, events, unit, window.first, window.last,
-                            serial, settings, libreSerial, createdBy,
+                            os, fmt, data.points, data.events, data.unit, window.first, window.last,
+                            data.serial, settings, libreSerial, createdBy,
                         )
                     } != null
                 }.getOrDefault(false)
             }
             exporting = false
-            Toast.makeText(context, if (ok) "Exported ${fmt.label}" else "Export failed", Toast.LENGTH_SHORT).show()
-            if (ok) onDismiss()
+            val message = when (ok) {
+                true -> "Exported ${fmt.label}"
+                false -> "Export failed"
+                null -> "Data is still loading — try again"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            if (ok == true) onDismiss()
         }
     }
 

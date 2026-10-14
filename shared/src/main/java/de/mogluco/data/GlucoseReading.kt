@@ -117,15 +117,78 @@ data class GlucosePoint(
  * light smoothing of sensor noise) when [enabled], or equal to raw when off. Receiver must be
  * time-sorted ascending. Alpha ≈ 0.4 blends the last ~2–3 readings — enough to calm jitter without
  * lagging the trend. This is the "smoothed" trace shown alongside "raw".
+ *
+ * The EMA starts afresh after a gap longer than [gapMillis] (a warm-up, a night out of range, a
+ * sensor change): the value before the gap says nothing about the one after it, and carried over
+ * it bent the first readings after the gap towards the old level. Within a gap-free series the
+ * result is unchanged. [alpha] is per sample, not per minute — a stretch of 5-minute historic
+ * points is therefore smoothed over a longer time than the 1-minute live trace.
  */
-fun List<GlucosePoint>.smoothed(enabled: Boolean, alpha: Double = 0.4): List<GlucosePoint> {
+fun List<GlucosePoint>.smoothed(enabled: Boolean, alpha: Double = 0.4, gapMillis: Long): List<GlucosePoint> {
     if (isEmpty()) return this
     if (!enabled) return map { if (it.calibratedMgdl == it.rawMgdl) it else it.copy(calibratedMgdl = it.rawMgdl) }
     var ema = first().rawMgdl
+    var prevMillis = first().epochMillis
     return map { p ->
+        if (p.epochMillis - prevMillis > gapMillis) ema = p.rawMgdl // as for the very first point
+        prevMillis = p.epochMillis
         ema = alpha * p.rawMgdl + (1 - alpha) * ema
         p.copy(calibratedMgdl = ema)
     }
+}
+
+/**
+ * The receiver, a single reading arriving on the live path, smoothed as [smoothed] smooths a point
+ * within its series: the EMA continued from the point before it, or started afresh at this reading
+ * when that point is more than [gapMillis] away (or there is none). For a reading at least as new
+ * as the running EMA [latest] the point before it is [latest]. An older one — the engine replays
+ * readings on a reconnect — has nothing to do with [latest]: it continues from the point before it
+ * in [series] (time-sorted ascending) instead. The points after an older one keep their values
+ * until the series is next smoothed as a whole.
+ */
+fun GlucosePoint.smoothedAfter(
+    latest: GlucosePoint?,
+    series: List<GlucosePoint>,
+    alpha: Double,
+    gapMillis: Long,
+): GlucosePoint {
+    val before = if (latest == null || epochMillis >= latest.epochMillis) {
+        latest
+    } else {
+        series.getOrNull(series.lowerBoundByTime(epochMillis) - 1)
+    }
+    val previous = before?.takeIf { epochMillis - it.epochMillis <= gapMillis }
+    return copy(calibratedMgdl = alpha * rawMgdl + (1 - alpha) * (previous?.calibratedMgdl ?: rawMgdl))
+}
+
+/**
+ * The receiver plus those [candidates] that lie in its gaps: a candidate is added only when the
+ * receiver has no point within [minDistanceMillis] of it. Nothing in the receiver is dropped or
+ * replaced, and a candidate never lands next to an existing point, so two sources that time the
+ * same reading a little differently cannot leave near-duplicates. Both lists must be time-sorted
+ * ascending with unique timestamps; so is the result. Returns the receiver itself when nothing
+ * was added.
+ */
+fun List<GlucosePoint>.filledFrom(candidates: List<GlucosePoint>, minDistanceMillis: Long): List<GlucosePoint> {
+    if (candidates.isEmpty()) return this
+    if (isEmpty()) return candidates
+    var out: ArrayList<GlucosePoint>? = null // allocated with the first candidate that fits
+    var copied = 0 // receiver points already in [out]
+    var i = 0 // first receiver point later than the candidate at hand
+    for (c in candidates) {
+        val t = c.epochMillis
+        while (i < size && this[i].epochMillis <= t) i++
+        val farFromPrevious = i == 0 || t - this[i - 1].epochMillis > minDistanceMillis
+        val farFromNext = i == size || this[i].epochMillis - t > minDistanceMillis
+        if (farFromPrevious && farFromNext) {
+            val o = out ?: ArrayList<GlucosePoint>(size + 16).also { out = it }
+            while (copied < i) o.add(this[copied++])
+            o.add(c)
+        }
+    }
+    val o = out ?: return this
+    while (copied < size) o.add(this[copied++])
+    return o
 }
 
 /**
@@ -172,6 +235,8 @@ data class GlucoseReading(
     val epochMillis: Long,
     val trend: TrendArrow,
     val ratePerMin: Double = 0.0,
+    /** The sensor it was taken by (its serial), null where that is not known. */
+    val sensorId: String? = null,
 ) {
     /** Primary displayed value (calibrated). */
     val mgdl: Double get() = calibratedMgdl

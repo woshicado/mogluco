@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,7 +46,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -67,9 +72,14 @@ import de.mogluco.ui.theme.GlucoseColors
 import de.mogluco.ui.theme.colorFor
 import de.mogluco.wear.ui.WearMoglucoTheme
 import de.mogluco.wear.ui.rememberLifecycleTicker
+import kotlin.math.sqrt
 
 /** Time windows offered on the watch (tap the chart to cycle). */
 private val WATCH_RANGES = listOf(TimeRange.H6, TimeRange.H12, TimeRange.D1)
+
+/** The screen's padding above and beside its content; the chart's round-screen inset counts from them. */
+private val TOP_PADDING = 20.dp
+private val SIDE_PADDING = 6.dp
 
 /**
  * Graph screen (tile-styled): everything on one screen, no scrolling — a big state-colored value +
@@ -93,11 +103,20 @@ fun WearGraphScreen(repository: GlucoseRepository) {
 
     val glucose = WearMoglucoTheme.glucose
 
+    // A round screen cuts off the chart's lower corners — on the right that is where the newest
+    // part of a low trace and the latest dot are drawn. How much depends on where the chart ends
+    // up (the text above it moves it), so that is taken from the layout: its top within the
+    // column, in px; NaN until it is placed.
+    val configuration = LocalConfiguration.current
+    val screenRound = configuration.isScreenRound
+    val screenWidth = configuration.screenWidthDp.dp
+    var chartTop by remember { mutableFloatStateOf(Float.NaN) }
+
     ScreenScaffold {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 20.dp, bottom = 8.dp, start = 6.dp, end = 6.dp),
+                .padding(top = TOP_PADDING, bottom = 8.dp, start = SIDE_PADDING, end = SIDE_PADDING),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
@@ -136,9 +155,25 @@ fun WearGraphScreen(repository: GlucoseRepository) {
                 lineColor = MaterialTheme.colorScheme.primary,
                 labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 gapMillis = gapMin * 60_000L,
+                // Every row of the chart stays inside the circle: the row farthest from the
+                // screen's centre decides (the bottom one, as the chart sits below it), less what
+                // the screen's own padding already keeps clear. The tap target keeps its width.
+                sideInset = {
+                    if (!screenRound || chartTop.isNaN()) {
+                        0f
+                    } else {
+                        val diameter = screenWidth.toPx()
+                        val top = TOP_PADDING.toPx() + chartTop
+                        (maxOf(
+                            roundScreenInset(diameter, top),
+                            roundScreenInset(diameter, top + size.height),
+                        ) - SIDE_PADDING.toPx()).coerceAtLeast(0f)
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(96.dp)
+                    .onPlaced { chartTop = it.positionInParent().y }
                     .clickable { rangeIndex = (rangeIndex + 1) % WATCH_RANGES.size },
             )
             Text(
@@ -152,9 +187,23 @@ fun WearGraphScreen(repository: GlucoseRepository) {
 }
 
 /**
+ * How far the row [y] below the top of a round screen of [diameter] has to keep from the screen's
+ * left and right edges to lie inside the circle (one unit throughout): the radius less half the
+ * chord at that row. 204 dp across, 66 dp below the centre: 102 − √(102² − 66²) ≈ 24 dp.
+ */
+internal fun roundScreenInset(diameter: Float, y: Float): Float {
+    val radius = diameter / 2f
+    val fromCentre = (y - radius).coerceIn(-radius, radius)
+    return radius - sqrt(radius * radius - fromCentre * fromCentre)
+}
+
+/**
  * Minimal watch chart: target band (in-range green at low alpha), calibrated line, latest
  * point dot, min/max scale labels. No inspector, no events, no dual raw/cal traces — those
  * live on the phone.
+ *
+ * [sideInset] = room to leave empty on both sides (px, read while drawing): the label gutter and
+ * the plot move in by it, so nothing is drawn where a round screen has no pixels.
  */
 @Composable
 fun WearGlucoseChart(
@@ -168,6 +217,7 @@ fun WearGlucoseChart(
     lineColor: Color,
     labelColor: Color,
     gapMillis: Long = 0L,
+    sideInset: DrawScope.() -> Float = { 0f },
     modifier: Modifier = Modifier,
 ) {
     val textMeasurer = rememberTextMeasurer()
@@ -183,8 +233,10 @@ fun WearGlucoseChart(
         minOf(dataMin - 15, targetLow - 25) to maxOf(dataMax + 15, targetHigh + 35)
     }
     Canvas(modifier) {
-        val leftPad = 26.dp.toPx() // label gutter
-        val plot = Rect(leftPad, 4.dp.toPx(), size.width - 2.dp.toPx(), size.height - 4.dp.toPx())
+        // Never more than a quarter of the width per side: a plot must remain.
+        val side = sideInset().coerceIn(0f, size.width / 4f)
+        val leftPad = side + 26.dp.toPx() // label gutter
+        val plot = Rect(leftPad, 4.dp.toPx(), size.width - side - 2.dp.toPx(), size.height - 4.dp.toPx())
         fun x(t: Long) = plot.left + (t - windowStart).toFloat() / windowMillis * plot.width
         fun y(v: Double) = (plot.bottom - ((v - yMin) / (yMax - yMin)).toFloat() * plot.height)
 

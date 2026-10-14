@@ -152,6 +152,17 @@ class MessageSender(val activity: Context) : CapabilityClient.OnCapabilityChange
 
     fun sendbluetooth(name: String, on: Boolean) = sendbool(BLUETOOTH_PATH, name, on)
 
+    /**
+     * Like [sendnetinfo] / [sendbluetooth], but awaiting the Data-Layer send: true when the message
+     * was handed to a connected node (a node that is listed but not actually connected fails the
+     * send). Blocking — up to the send timeout — so call them off the main thread.
+     */
+    fun sendnetinfoResult(node: String, data: ByteArray): Boolean =
+        nameSendMessageResult(node, NET_PATH, data)
+
+    fun sendbluetoothResult(name: String, on: Boolean): Boolean =
+        nameSendMessageResult(name, BLUETOOTH_PATH, byteArrayOf(if (on) 1 else 0))
+
     /** Additive path (redesign): the watch asks the phone to take the sensor back. */
     fun sendtakeback(name: String) = nameSendMessage(name, TAKEBACK_PATH, byteArrayOf(1))
 
@@ -236,6 +247,27 @@ class MessageSender(val activity: Context) : CapabilityClient.OnCapabilityChange
         fun sendCatchup() {
             val sender = messagesender ?: return
             sender.sendmessage(CATCHUP_PATH, byteArrayOf(1))
+        }
+
+        /**
+         * Like [sendCatchup], but awaits the Data-Layer sends: true when at least one peer took the
+         * request (a node that is listed but not actually connected fails the send). Blocking — up
+         * to the send timeout per peer — so call it off the main thread.
+         */
+        @JvmStatic
+        fun sendCatchupResult(): Boolean {
+            val sender = messagesender ?: return false
+            val nodes = sender.nodes
+            if (nodes == null) {
+                Log.d(LOG_ID, "sendCatchupResult nodes=null")
+                scope.launch { sender.findWearDevicesWithApp() }
+                return false
+            }
+            var sent = false
+            for (node in nodes) {
+                if (sender.nameSendMessageResult(node.id, CATCHUP_PATH, byteArrayOf(1))) sent = true
+            }
+            return sent
         }
 
         /** Answer a /catchup with a recent-history batch, targeted at the requester. */

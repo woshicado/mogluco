@@ -242,6 +242,22 @@ public class Natives {
 
   public static native long getSensorStartmsec(long dataptr);
 
+  /**
+   * {@link #getSensorState} / {@link #getSensorStartmsec} by sensor serial (-1 / 0 for an unknown
+   * one). Read-only: unlike {@link #getdataptr} they allocate nothing that must be freed and leave
+   * the sensor's error flag alone, so they are safe to call on every reading.
+   */
+  public static native int statefromSerial(String sensorname);
+
+  public static native long startmsecfromSerial(String sensorname);
+
+  /**
+   * Official end of the sensor's wear time by serial, epoch millis; 0 when the engine does not know
+   * it (unknown sensor, no start time, or no recorded wear duration — it would then assume 14
+   * days). Read-only like {@link #startmsecfromSerial}, and in the watch's native library too.
+   */
+  public static native long officialendmsecfromSerial(String sensorname);
+
   public static native int getLibreVersion(long dataptr);
 
   public static native int getsensorgen(long dataptr);
@@ -262,6 +278,14 @@ public class Natives {
 
   /** Sensor serial/name from a sensor-data pointer (from {@link #activeSensorPtrs}). */
   public static native String namefromSensorptr(long sensorptr);
+
+  /**
+   * {@code [activation, official end, last stored reading]} of a stored sensor, epoch SECONDS
+   * (0 = unknown), from a sensor-data pointer ({@link #allSensorPtrs}). Read-only: unlike
+   * {@link #getdataptr} it allocates nothing and leaves the sensor's error/streaming state alone.
+   * Like {@link #namefromSensorptr}, not in the watch's native library.
+   */
+  public static native long[] lifefromSensorptr(long sensorptr);
 
   /**
    * One stored 5-minute stream reading for a sensor, starting search at {@code pos}. Returns a
