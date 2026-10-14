@@ -4,6 +4,10 @@
     <!-- LibreView: fetch the account ID and upload glucose data. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Watch mirror: WatchLink's network callback re-establishes the sync and catches up
+         readings when connectivity returns (registerNetworkCallback throws without it). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- NFC: activate a new Libre3 sensor. -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />

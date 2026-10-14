@@ -227,6 +227,11 @@ public class Libre3GattCallback extends SuperGattCallback {
       // a real disconnect (or on a fresh object) this changes nothing; the handshake state
       // (isPreAuthorized, commandphase, services) is deliberately left alone.
       cancelretrytimer();
+      connectTimeouts = 0;
+      if (scanningForSensor) {
+        scanningForSensor = false;
+        SensorBluetooth.stopScanIfAllConnected();
+      }
       oneMinuteReadingSize = 0;
       backFillInProgress = false;
       wrotecharacter = false;
@@ -268,6 +273,7 @@ public class Libre3GattCallback extends SuperGattCallback {
       cancelretrytimer();
       constatchange[1] = tim;
       setConStatus(status);
+      connectTimeouts = (status == STATUS_CONNECT_TIMEOUT) ? connectTimeouts + 1 : 0;
       if (lastphase5) {
         // A remote terminate (19) right after the phase-5 resume can mean the stored auth key is
         // no longer accepted — but it is also an ordinary link drop. Upstream only forgets the key
@@ -888,7 +894,18 @@ public class Libre3GattCallback extends SuperGattCallback {
     } else {
       bluetoothGatt.close();
       mBluetoothGatt = null;
-      connectDevice(0); // TODO:  What if it fails?
+      if (connectTimeouts >= TIMEOUTS_BEFORE_SCAN) {
+        // The sensor stopped answering (out of range, silent or failed). Retrying the direct
+        // connect back-to-back keeps the controller scanning at its high direct-connect duty
+        // cycle for as long as the outage lasts. Instead, look for its advertisement with a
+        // low-power scan, which reconnects as soon as it is seen, and keep a slow direct retry
+        // in case background scans can't see it (unfiltered scans return nothing screen-off).
+        scanningForSensor = true;
+        SensorBluetooth.scanFor(this);
+        connectDevice(UNREACHABLE_RETRY_MS);
+      } else {
+        connectDevice(0);
+      }
     }
   }
 
@@ -1305,6 +1322,21 @@ public class Libre3GattCallback extends SuperGattCallback {
 
   /** Wall time of the last decoded one-minute reading; gates the auth-key wipe on status 19. */
   private long datatime = 0L;
+
+  /** GATT_CONNECTION_TIMEOUT: the connect attempt expired without the sensor ever answering. */
+  private static final int STATUS_CONNECT_TIMEOUT = 147;
+
+  /** Consecutive timeouts after which the sensor is treated as unreachable (see realdisconnected). */
+  private static final int TIMEOUTS_BEFORE_SCAN = 3;
+
+  /** Direct-connect retry interval while the sensor is unreachable. */
+  private static final long UNREACHABLE_RETRY_MS = 60_000L;
+
+  /** Consecutive connect attempts that timed out; reset by any connection or other disconnect. */
+  private int connectTimeouts = 0;
+
+  /** A {@link SensorBluetooth#scanFor} scan was started that the next connection should end. */
+  private boolean scanningForSensor = false;
 
   private int oneMinuteReadingSize = 0;
   //    private int oneMinutePacketNumber = 0;

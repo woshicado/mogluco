@@ -83,7 +83,8 @@ data class SensorError(
          *
          * @param status the GATT status. 0 = success and 22 = local termination are benign on
          *   their own; 8 = link timeout, 19 = sensor dropped the link, 133 = connection failed,
-         *   147 = secure handshake rejected.
+         *   147 = connection attempt timed out (GATT_CONNECTION_TIMEOUT: the sensor never
+         *   answered, so no handshake was attempted).
          * @param detail the failed handshake stage from the engine, or null. A non-null detail is
          *   a conclusive failure even when [status] is 0 (the app aborted the handshake locally,
          *   e.g. on an unexpected SEC_CHAR_CHALLENGE_DATA length).
@@ -91,11 +92,14 @@ data class SensorError(
         fun fromConnection(status: Int, detail: String?): SensorError? {
             val benignStatus = status == 0 || status == 22
             if (benignStatus && detail == null) return null
+            // Without a recorded handshake stage these mean the radio link never came up or was
+            // lost — the sensor is out of range, silent, or failed — not a rejected handshake.
+            if (detail == null && status in UNREACHABLE_STATUSES) return unreachable(status)
             val cause = when (status) {
                 8 -> "the link timed out"
                 19 -> "the sensor dropped the connection"
                 133 -> "the connection failed"
-                147 -> "the sensor rejected the secure handshake"
+                147 -> "the connection timed out"
                 0, 22 -> "the handshake was aborted"
                 else -> "BLE status $status"
             }
@@ -111,6 +115,27 @@ data class SensorError(
                 )
             }
             return SensorError(code = status, title = "Sensor setup failed", meaning = meaning)
+        }
+
+        /** GATT statuses for a link that never came up or went silent: 8, 133, 147. */
+        private val UNREACHABLE_STATUSES = setOf(8, 133, 147)
+
+        private fun unreachable(status: Int): SensorError {
+            val cause = when (status) {
+                8 -> "the Bluetooth link was lost"
+                147 -> "connection attempts time out"
+                else -> "connection attempts fail"
+            }
+            return SensorError(
+                code = status,
+                title = "Sensor not responding",
+                meaning = "Mogluco can't reach the sensor over Bluetooth ($cause), so no glucose " +
+                    "data is coming through. Keep the phone close to the sensor and check that " +
+                    "the sensor is still firmly attached, and that no other device (your watch, " +
+                    "another phone or the Libre app) is connected to it. If it stays unreachable " +
+                    "for hours, the sensor has probably failed; report it to Abbott with its " +
+                    "serial number and the time the readings stopped.",
+            )
         }
     }
 }

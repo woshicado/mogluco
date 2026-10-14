@@ -71,6 +71,43 @@ public class SensorBluetooth {
     if (blueone != null) blueone.startScan(0L);
   }
 
+  /**
+   * Scans for a sensor whose direct connects keep timing out, so it is reconnected as soon as it
+   * advertises again. Leaves a running scan alone and collapses one that is only scheduled, so
+   * repeated calls never stack scans.
+   */
+  static void scanFor(SuperGattCallback cb) {
+    final var blue = blueone;
+    if (blue == null) return;
+    // checkdevice() only connects a callback that has not been found yet.
+    cb.foundtime = 0L;
+    if (blue.mScanning) return;
+    Applic.getHandler().removeCallbacks(blue.scanRunnable);
+    blue.startScan(0L);
+  }
+
+  /**
+   * Ends a {@link #scanFor} scan once every sensor is connected again. A connected sensor stops
+   * advertising, so the scan would otherwise keep cycling (timeout, rescan) indefinitely.
+   */
+  @SuppressLint("MissingPermission")
+  static void stopScanIfAllConnected() {
+    final var blue = blueone;
+    if (blue == null || blue.mBluetoothManager == null) return;
+    try {
+      for (var cb : blue.gattcallbacks) {
+        final var device = cb.mActiveBluetoothDevice;
+        if (device == null
+            || blue.mBluetoothManager.getConnectionState(device, GATT)
+                != BluetoothGatt.STATE_CONNECTED) return;
+      }
+    } catch (Throwable e) {
+      Log.stack(LOG_ID, "stopScanIfAllConnected", e);
+      return;
+    }
+    blue.stopScan(false);
+  }
+
   private static final String LOG_ID = "SensorBluetooth";
   private static final int scantimeout = 390000;
   private static final int scaninterval = 60000;
