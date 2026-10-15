@@ -608,7 +608,7 @@ private fun ErrorBanner(error: de.mogluco.data.SensorError) {
             Spacer(Modifier.size(12.dp))
             Column {
                 Text(
-                    "${error.title} (code ${error.code})",
+                    "${error.title} (${error.codeLabel})",
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     fontWeight = FontWeight.Bold,
@@ -617,6 +617,12 @@ private fun ErrorBanner(error: de.mogluco.data.SensorError) {
                     error.meaning,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Text(
+                    error.sourceNote,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }
@@ -795,7 +801,7 @@ private fun NoReadingsYetBanner() {
 
 /** Title of [NewSensorFaultBanner]: the error banner's title, named as the new sensor's. */
 internal fun newSensorFaultTitle(sensorId: String, error: de.mogluco.data.SensorError): String =
-    "New sensor $sensorId: ${error.title} (code ${error.code})"
+    "New sensor $sensorId: ${error.title} (${error.codeLabel})"
 
 /**
  * A newly activated sensor's fault, shown below the status of the sensor on screen: while the
@@ -811,7 +817,7 @@ private fun NewSensorFaultBanner(newSensor: SensorInfo?) {
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
         icon = Icons.Filled.WarningAmber,
         title = newSensorFaultTitle(newSensor.id, error),
-        body = "${error.meaning} Readings keep coming from the previous sensor until the new one starts.",
+        body = "${error.meaning} Readings keep coming from the previous sensor until the new one starts. ${error.sourceNote}",
     )
 }
 

@@ -745,12 +745,11 @@ class NativeGlucoseRepository(
      */
     private fun updateSensor(serial: String?, alarm: Int) {
         if (serial.isNullOrEmpty()) return
-        // Priority: a hardware fault (defective / replace / ended) is definitive; then a
-        // connection/handshake failure (no data is flowing at all); then an out-of-range glucose
-        // state. The hardware state comes from the engine's sensorerror/patchState.
-        val error = SensorError.fromSensorState(Sensors.sensorState(serial))
-            ?: connectionError
-            ?: SensorError.fromGlucoseAlarm(alarm)
+        // Priority and the warm-up rule: SensorError.select. The state comes from the engine's
+        // sensorerror/patchState.
+        val start = activationOf(serial)
+        val warmingUp = start > 0L && System.currentTimeMillis() < start + SensorInfo.WARMUP_MS
+        val error = SensorError.select(Sensors.sensorState(serial), connectionError, alarm, warmingUp)
         val current = _sensor.value
         if (current != null && current.id == serial) {
             // Same sensor: just refresh the error state (banner appears/clears with each reading).

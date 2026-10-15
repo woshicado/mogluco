@@ -22,69 +22,118 @@ import de.mogluco.ui.util.localDaysBetween
 import java.util.concurrent.TimeUnit
 
 /**
- * A reported sensor fault. For Libre 3 the engine surfaces a numeric status; [meaning]
- * translates the common ones into plain language for the home-screen warning banner.
+ * A fault for the home-screen warning banner: a numeric [code], where it comes from ([source]) and
+ * a plain-language [meaning].
+ *
+ * None of these codes is an error code the sensor sent. Mogluco derives 4–7 and 9 from the
+ * sensor's readings and state, and the connection codes are statuses of the phone's Bluetooth
+ * stack. [source] says which, so a user reporting a failed sensor to Abbott knows not to quote
+ * them as a sensor error code.
+ *
+ * The texts say only what Mogluco observed, how sure it is of the cause, what it does about it by
+ * itself, and from when on the user should act: most of these clear on their own, and a banner
+ * that cries "defective sensor" over a passing hiccup teaches the user to ignore all of them.
+ *
+ * @param sensorFault whether this can mean a failed sensor, so [sourceNote] adds what to report
+ *   to Abbott; false for a reading at the edge of the measurable range
  */
 data class SensorError(
     val code: Int,
     val title: String,
     val meaning: String,
+    val source: Source = Source.APP,
+    val sensorFault: Boolean = true,
 ) {
-    companion object {
-        /** Plain-language descriptions of the Libre 3 sensor error/status codes. */
-        fun libre3(code: Int): SensorError = when (code) {
-            1 -> SensorError(code, "Sensor too hot", "The sensor is above its operating temperature. Move somewhere cooler and wait for the next reading.")
-            2 -> SensorError(code, "Sensor too cold", "The sensor is below its operating temperature. Warm up and wait for the next reading.")
-            3 -> SensorError(code, "Glucose unavailable", "The sensor can't produce a reading right now. This usually clears on its own within a few minutes.")
-            4 -> SensorError(code, "Glucose high", "Glucose is above the sensor's measurable range (>27.8 mmol/L / 500 mg/dL).")
-            5 -> SensorError(code, "Glucose low", "Glucose is below the sensor's measurable range (<2.2 mmol/L / 40 mg/dL).")
-            6 -> SensorError(code, "Sensor error", "The sensor reported a fault. If it persists, the sensor may need to be replaced.")
-            else -> SensorError(code, "Sensor error $code", "The sensor reported an unrecognised status. Check the sensor and try scanning again.")
-        }
+    /** Where [code] comes from; [note] says so on the banner. */
+    enum class Source(val label: String, val note: String) {
+        /** Mogluco's own state number, derived from the sensor's readings or state. */
+        APP("Mogluco code", "This is Mogluco's own code, not an error code from the sensor."),
 
+        /** A GATT/HCI status from the phone's (or watch's) Bluetooth stack. */
+        BLUETOOTH("Bluetooth status", "This is a status from the phone's Bluetooth, not an error code from the sensor."),
+    }
+
+    /** The code named by its source, e.g. "Mogluco code 6" or "Bluetooth status 147". */
+    val codeLabel: String get() = "${source.label} $code"
+
+    /**
+     * The banner's last line: that [code] is not from the sensor, and for a [sensorFault] what to
+     * give Abbott instead.
+     */
+    val sourceNote: String
+        get() = if (!sensorFault) source.note else "${source.note} To report a failed sensor to " +
+            "Abbott, give its serial number and when the problem started."
+
+    companion object {
         /**
-         * Maps the engine's per-reading alarm/state code to a sensor error, or null when the
-         * reading is a normal value (or a user-threshold high/low *glucose* alarm, which is not a
-         * sensor fault). Only the codes that mean "the sensor can't give a usable number" are
-         * surfaced: 3 = unavailable, 4 = above measurable range, 5 = below measurable range.
+         * Maps the engine's per-reading alarm/state code to a banner, or null. Only a reading at
+         * the edge of the measurable range is surfaced: 4 = above it, 5 = below it.
          *
          * Verified against the native engine (Common/src/main/cpp/g.cpp: the is* constants +
-         * getalarmonly): isAgain=3, isHighest=4, isLowest=5 are the "can't measure" codes, while
-         * isHigh=6 / isLow=7 / isVeryHigh=16 / isVeryLow=17 / isPreHigh=18 / isPreLow=19 are
-         * user-threshold glucose alarms and correctly fall through to null here — they are handled
-         * as glucose alarms (AlarmController), not sensor-fault banners.
+         * getalarmonly): isHighest=4 / isLowest=5 come with a reading over 500 / under 40 mg/dL
+         * (Libre 3 sends 501 / 39 there). isAgain=3 is the "glucose available again" alarm on the
+         * first reading after a gap, so no fault, and isHigh=6 / isLow=7 / isVeryHigh=16 /
+         * isVeryLow=17 / isPreHigh=18 / isPreLow=19 are user-threshold glucose alarms, handled
+         * by AlarmController: all of these fall through to null.
          */
         fun fromGlucoseAlarm(alarm: Int): SensorError? = when (alarm) {
-            3 -> SensorError(alarm, "Glucose unavailable", "The sensor can't produce a reading right now. This usually clears on its own within a few minutes.")
-            4 -> SensorError(alarm, "Glucose above range", "Glucose is above the sensor's measurable range (over 27.8 mmol/L / 500 mg/dL).")
-            5 -> SensorError(alarm, "Glucose below range", "Glucose is below the sensor's measurable range (under 2.2 mmol/L / 40 mg/dL).")
+            4 -> SensorError(alarm, "Glucose above sensor range", "The sensor measured more than 500 mg/dL (27.8 mmol/L), the highest it can measure, so your glucose may be higher than shown. Check it with a blood glucose meter.", sensorFault = false)
+            5 -> SensorError(alarm, "Glucose below sensor range", "The sensor measured less than 40 mg/dL (2.2 mmol/L), the lowest it can measure, so your glucose may be lower than shown. Check it with a blood glucose meter.", sensorFault = false)
             else -> null
         }
 
         /**
-         * Maps the engine's sensor-state code (from `Sensors.sensorState`) to a hardware fault, or
-         * null when the sensor is healthy/warming. 6 = a defective sensor (the first reading after
-         * warm-up was out of range), 7 = replace, 9 = ended. Code 8 (not ready) is left to the
-         * warm-up note, not the error banner.
+         * Maps the engine's sensor-state code (from `Sensors.sensorState`) to a fault, or null when
+         * the sensor is healthy/warming. 6 = the last one-minute reading was outside 39–501 mg/dL
+         * (held for 10 minutes unless a valid reading clears it), 7 = replace (never set for a
+         * Libre 3), 9 = the sensor's own patch state is past "active": expired, or stopped early.
+         * Code 8 (not ready) is left to the warm-up note, not the error banner.
          */
         fun fromSensorState(state: Int): SensorError? = when (state) {
-            6 -> SensorError(state, "Sensor error", "The sensor reported a fault — its readings are out of range. If it persists, the sensor is likely defective and should be replaced.")
+            6 -> SensorError(state, "Invalid reading", "The sensor's latest reading had no valid glucose value. That happens now and then and usually clears with the next reading, a minute later. Only if it goes on for hours is the sensor likely failing.")
             7 -> SensorError(state, "Replace sensor", "The sensor has failed and needs to be replaced.")
-            9 -> SensorError(state, "Sensor ended", "This sensor has reached the end of its life. Activate a new one.")
+            9 -> SensorError(state, "Sensor stopped", "The sensor reports that it has stopped measuring, so no more readings will come from it. If its wear time wasn't over yet, it stopped early: replace it and report it to Abbott.")
             else -> null
         }
 
         /**
-         * Maps a BLE disconnect into a connection/handshake error, or null for a benign drop.
+         * The error to show for a sensor, or null. A fault from its state (invalid reading /
+         * replace / stopped) comes first; then a connection/handshake failure (no data is flowing
+         * at all); then a reading at the edge of the measurable range.
          *
-         * This surfaces the failures behind upstream issue #405: Mogluco connects to the sensor
-         * but the Libre 3 secure handshake never completes, so no glucose data ever flows. Without
-         * this the home screen showed nothing — a sensor stuck "warming up" forever with no clue.
+         * During the 60-minute warm-up the sensor sends placeholder readings, so the reading
+         * derived codes (6 and [fromGlucoseAlarm]'s 4/5) mean nothing yet: the warm-up note
+         * takes precedence. Only conclusive failures still show then: the sensor reporting that it
+         * stopped (or a replace), and [connection], which holds nothing during warm-up but a
+         * recorded handshake failure.
+         *
+         * @param state the engine's sensor state ([fromSensorState])
+         * @param connection the current connection/handshake failure, or null
+         * @param alarm the engine's per-reading alarm/state code ([fromGlucoseAlarm])
+         * @param warmingUp whether the sensor is still in its warm-up
+         */
+        fun select(state: Int, connection: SensorError?, alarm: Int, warmingUp: Boolean): SensorError? {
+            if (warmingUp) return fromSensorState(state)?.takeIf { it.code != STATE_INVALID_READING } ?: connection
+            return fromSensorState(state) ?: connection ?: fromGlucoseAlarm(alarm)
+        }
+
+        /** Engine state for an out-of-range reading ([fromSensorState]). */
+        private const val STATE_INVALID_READING = 6
+
+        /**
+         * Maps a BLE disconnect into a connection/handshake error, or null for a benign drop. The
+         * repository shows it only once no reading has come for 6 minutes and the failure recurred
+         * (or a handshake stage was recorded), and clears it with the next reading.
+         *
+         * Only a recorded [detail] proves a failed Libre 3 secure handshake (upstream issue #405:
+         * Mogluco connects but the handshake never completes, so no data ever flows). Without one
+         * the status only says how the link failed, so the text names that and no more.
          *
          * @param status the GATT status. 0 = success and 22 = local termination are benign on
-         *   their own; 8 = link timeout, 19 = sensor dropped the link, 133 = connection failed,
-         *   147 = connection attempt timed out (GATT_CONNECTION_TIMEOUT: the sensor never
-         *   answered, so no handshake was attempted).
+         *   their own; 8 = link supervision timeout (an open link went silent), 19 = the sensor
+         *   closed the link, 62 = the connection could not be established, 133 = Android's
+         *   generic connection failure, 147 = connection attempt timed out
+         *   (GATT_CONNECTION_TIMEOUT: the sensor never answered).
          * @param detail the failed handshake stage from the engine, or null. A non-null detail is
          *   a conclusive failure even when [status] is 0 (the app aborted the handshake locally,
          *   e.g. on an unexpected SEC_CHAR_CHALLENGE_DATA length).
@@ -92,49 +141,62 @@ data class SensorError(
         fun fromConnection(status: Int, detail: String?): SensorError? {
             val benignStatus = status == 0 || status == 22
             if (benignStatus && detail == null) return null
-            // Without a recorded handshake stage these mean the radio link never came up or was
-            // lost — the sensor is out of range, silent, or failed — not a rejected handshake.
-            if (detail == null && status in UNREACHABLE_STATUSES) return unreachable(status)
-            val cause = when (status) {
-                8 -> "the link timed out"
-                19 -> "the sensor dropped the connection"
-                133 -> "the connection failed"
-                147 -> "the connection timed out"
-                0, 22 -> "the handshake was aborted"
-                else -> "BLE status $status"
+            if (!detail.isNullOrBlank()) return handshakeFailed(status, detail)
+            if (status in UNREACHABLE_STATUSES) return unreachable(status)
+            val meaning = if (status == STATUS_PEER_TERMINATED) {
+                "The sensor answered but closed the connection again before sending any data, " +
+                    "several times in a row. Most often another device is using it (your watch, " +
+                    "another phone or the Libre app); it is also how the Libre 3 secure handshake " +
+                    "problem (issue #405) shows. Mogluco keeps retrying; make sure no other " +
+                    "device is connected to this sensor."
+            } else {
+                "The connection to the sensor failed several times in a row before any data came " +
+                    "through. Mogluco keeps retrying, which usually fixes it within minutes."
             }
-            val meaning = buildString {
-                append("Mogluco reached the sensor but couldn't finish the Libre 3 secure handshake (")
-                append(cause)
-                append("), so no glucose data can come through. ")
-                if (!detail.isNullOrBlank()) append("Stage: $detail. ")
-                append(
-                    "Try turning Bluetooth off and on, then reboot, and make sure no other app or " +
-                        "phone is connected to this sensor. If it keeps happening across sensors, " +
-                        "this is the known Libre 3 handshake problem (see issue #405)."
-                )
-            }
-            return SensorError(code = status, title = "Sensor setup failed", meaning = meaning)
+            return SensorError(code = status, title = "Sensor keeps disconnecting", meaning = meaning, source = Source.BLUETOOTH)
         }
 
-        /** GATT statuses for a link that never came up or went silent: 8, 133, 147. */
-        private val UNREACHABLE_STATUSES = setOf(8, 133, 147)
+        /** GATT statuses for a link that never came up or went silent: 8, 62, 133, 147. */
+        private val UNREACHABLE_STATUSES = setOf(8, 62, 133, 147)
+
+        /** GATT status 19: the remote side (the sensor) terminated the connection. */
+        private const val STATUS_PEER_TERMINATED = 19
 
         private fun unreachable(status: Int): SensorError {
-            val cause = when (status) {
-                8 -> "the Bluetooth link was lost"
-                147 -> "connection attempts time out"
-                else -> "connection attempts fail"
+            val observed = when (status) {
+                8 -> "the Bluetooth link to the sensor keeps going silent"
+                147 -> "the sensor doesn't answer connection attempts"
+                62 -> "connections to the sensor can't be established"
+                else -> "connection attempts to the sensor keep failing"
             }
             return SensorError(
                 code = status,
-                title = "Sensor not responding",
-                meaning = "Mogluco can't reach the sensor over Bluetooth ($cause), so no glucose " +
-                    "data is coming through. Keep the phone close to the sensor and check that " +
-                    "the sensor is still firmly attached, and that no other device (your watch, " +
-                    "another phone or the Libre app) is connected to it. If it stays unreachable " +
-                    "for hours, the sensor has probably failed; report it to Abbott with its " +
-                    "serial number and the time the readings stopped.",
+                title = "No connection to sensor",
+                meaning = "No reading for over 6 minutes: $observed. Mogluco keeps retrying by " +
+                    "itself, and this usually ends once the phone is close to the sensor again. " +
+                    "It also happens when another device (your watch, another phone or the " +
+                    "Libre app) holds the connection, since the sensor talks to one device at a " +
+                    "time. If there's no data for several hours, the sensor has likely stopped " +
+                    "transmitting.",
+                source = Source.BLUETOOTH,
+            )
+        }
+
+        private fun handshakeFailed(status: Int, detail: String): SensorError {
+            val how = when (status) {
+                0, 22 -> "Mogluco aborted it"
+                19 -> "the sensor closed the connection"
+                else -> "Bluetooth status $status"
+            }
+            return SensorError(
+                code = status,
+                title = "Sensor setup failed",
+                meaning = "Mogluco reached the sensor, but the Libre 3 secure handshake failed at " +
+                    "stage $detail ($how), so no data can come through. Mogluco retries on the " +
+                    "next connection. If it keeps failing, make sure no other device is connected " +
+                    "to this sensor, then turn Bluetooth off and on. Failing on every sensor is " +
+                    "the known Libre 3 handshake problem (issue #405).",
+                source = Source.BLUETOOTH,
             )
         }
     }
