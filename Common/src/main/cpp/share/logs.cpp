@@ -30,6 +30,9 @@
 #include <algorithm>
 #include <string.h>
 #include <charconv>
+#include <atomic>
+#include <mutex>
+#include <sys/stat.h>
 //#undef NOLOG
 #include "logs.hpp"
 #include "inout.hpp"
@@ -47,6 +50,49 @@ LOGGER("bufaddress: %p: %s",buf,buf);
 #include <android/log.h>
 #define anlog(...)  __android_log_print(ANDROID_LOG_INFO,"logs",__VA_ARGS__)
 
+// The log is capped: past maxlogsize it moves to "<log>.old" (replacing the previous one) and a
+// fresh file starts, so at most about twice that is kept. Upstream appended to one file for good,
+// which over months of use ran to hundreds of MB.
+static constexpr off_t maxlogsize=8*1024*1024;
+static const char *logpath=nullptr; //set once, on the first open; points at storage of process lifetime
+static std::atomic<off_t> logwritten{0};
+static std::mutex logrotatemutex;
+
+static int opencappedlog(const char *path) {
+	struct stat st;
+	if(stat(path,&st)==0&&st.st_size>maxlogsize) //left over uncapped by an earlier build
+		unlink(path);
+	const int handle=sys_opener(path,O_APPEND|O_CREAT|O_WRONLY, S_IRUSR |S_IWUSR);
+	if(handle>=0) {
+		logpath=path;
+		logwritten=(stat(path,&st)==0)?st.st_size:0;
+		}
+	return handle;
+	}
+
+// Starts a fresh log once maxlogsize is written. Other threads keep writing to [handle] all along,
+// so it is never closed (its number could be reused by a data file in between): the fresh file is
+// dup2()'ed onto it, as onto stderr/stdout, which getlogfile() pointed at the log as well.
+static void rotatelog(int handle) {
+	std::lock_guard<std::mutex> lock(logrotatemutex);
+	if(logwritten<maxlogsize||!logpath) //rotated by another thread meanwhile, or no log file
+		return;
+	logwritten=0;
+	const size_t len=strlen(logpath);
+	char old[len+5];
+	memcpy(old,logpath,len);
+	memcpy(old+len,".old",5);
+	const int fresh=(rename(logpath,old)==0)?sys_opener(logpath,O_APPEND|O_CREAT|O_WRONLY, S_IRUSR |S_IWUSR):-1;
+	if(fresh<0) { //can't rotate: start over in the same file rather than let it grow
+		ftruncate(handle,0);
+		return;
+		}
+	dup2(fresh,handle);
+	dup2(fresh,STDERR_FILENO);
+	dup2(fresh,STDOUT_FILENO);
+	close(fresh);
+	}
+
 extern int getlogfile();
 int getlogfile() {
 #pragma  message "basedir" BASEDIR
@@ -60,7 +106,7 @@ extern          pathconcat logfile;
 			
 	//		pathconcat file(logbasedir,LASTDIR ".log");
 			if(logfile.data())
-				handle=sys_opener( logfile.data(),O_APPEND|O_CREAT|O_WRONLY, S_IRUSR |S_IWUSR);
+				handle=opencappedlog(logfile.data());
 			else
 				return STDERR_FILENO;
 			}
@@ -74,8 +120,8 @@ extern          pathconcat logfile;
 			return STDERR_FILENO;
 		if(sys_mkdir(LOGBASE,0700)!=0&&errno!=EEXIST)
 			return STDERR_FILENO;
-		  const char logfile[]= LOGBASE "/" LASTDIR ".log";
-         	handle=sys_opener( logfile,O_APPEND|O_CREAT|O_WRONLY, S_IRUSR |S_IWUSR);
+		  static const char logfile[]= LOGBASE "/" LASTDIR ".log";
+         	handle=opencappedlog(logfile);
 	 	}
         // int handle=open( logfile,O_APPEND|O_CREAT|O_WRONLY, S_IRUSR |S_IWUSR);
 	 if(handle<0) {
@@ -140,6 +186,10 @@ void logwriter(const char *buf,const int len) {
 			handle=getlogfile();
 	#endif
 	       sys_write(handle,buf,len);
+	#ifndef NOTAPP
+	       if((logwritten+=len)>=maxlogsize)
+			rotatelog(handle);
+	#endif
        	}
 	}
 int vloggert( const char *format, va_list args) {

@@ -204,6 +204,17 @@ int setfilesdir(const string_view filesdir,const char *country) {
      mkdir(sensorbasedir.data(),0700);
 #ifdef JUGGLUCO_APP
     logfile.set(logbasedir,LASTDIR ".log");
+#ifdef NOLOG
+    // Nothing writes these without file logging: remove the ones an earlier build with it left
+    // behind. Its log was never capped and ran to hundreds of MB over months of use.
+    unlink(logfile.data());
+    {
+    pathconcat old(logbasedir,LASTDIR ".log.old");
+    unlink(old.data());
+    pathconcat logcat(logbasedir,"logcat.txt");
+    unlink(logcat.data());
+    }
+#endif
 #endif
     settings= new(std::nothrow) Settings(globalbasedir,settingsdat,country);
     if(!settings) {

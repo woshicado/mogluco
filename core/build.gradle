@@ -96,6 +96,17 @@ android {
         }
         release {
             buildConfigField "int", "doLog", "0"
+            // No native file log and no raw stream dumps, as in the legacy release build
+            // (Common/build.gradle). The CMakeLists' own fallback for this never applies under
+            // AGP, which always sets CMAKE_BUILD_TYPE; without these the engine appended every
+            // log line to files/logs/trace.log for good. Debug builds keep a capped log
+            // (share/logs.cpp). RELEASEDIR/RELEASEID stay off: they would move the data directory.
+            externalNativeBuild {
+                cmake {
+                    cppFlags '-DNOLOG=1', '-DNORAWSTREAM=1'
+                    cFlags '-DNOLOG=1', '-DNORAWSTREAM=1'
+                }
+            }
         }
     }
 
